@@ -792,7 +792,7 @@ export default function RouteBinderPage() {
                 </Panel>
               ) : null}
             </div>
-{/* Adjust 2 */}
+{/* Adjust 3 */}
             {/* Sheet always present on tablet, and also present on phone when mode is sheet */}
             {(mobileMode === "sheet" || !mobileMode) ? (
               <Panel
