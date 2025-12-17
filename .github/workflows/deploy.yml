@@ -1,3 +1,4 @@
+```yaml
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -49,6 +50,13 @@ jobs:
             fi
 
             echo ""
+            echo "0.2) Ensure curl exists (real health checks)"
+            if ! command -v curl >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y curl
+            fi
+
+            echo ""
             echo "1) Clone or update repo"
             if [ ! -d "$REPO_DIR/.git" ]; then
               rm -rf "$REPO_DIR"
@@ -76,22 +84,44 @@ jobs:
             npm prune --omit=dev || true
 
             echo ""
-            echo "3) Restart PM2 cleanly (force Next to bind to $HOST:$PORT)"
-            export NODE_ENV="production"
-
-            # Stop old process if it exists
+            echo "3) Stop PM2 process and free the port"
             pm2 delete "$APP_NAME" >/dev/null 2>&1 || true
 
-            # Start Next explicitly, so port is never "whatever"
-            pm2 start node --name "$APP_NAME" --cwd "$APP_DIR" --time -- \
-              node_modules/next/dist/bin/next start -H "$HOST" -p "$PORT"
+            if ss -lntp | grep -q ":$PORT"; then
+              echo "Port $PORT is busy, freeing it"
+              if command -v fuser >/dev/null 2>&1; then
+                fuser -k "${PORT}/tcp" || true
+              fi
+              pkill -f "next start.*${PORT}" || true
+              pkill -f "node_modules/next/dist/bin/next start.*${PORT}" || true
+            fi
 
+            echo ""
+            echo "4) Start with PM2 pinned to $HOST:$PORT"
+            export NODE_ENV="production"
+            cd "$APP_DIR"
+
+            # Use npm start so it matches your package.json, while forcing host and port
+            pm2 start npm --name "$APP_NAME" --time -- start -- -p "$PORT" -H "$HOST"
             pm2 save || true
 
             echo ""
-            echo "4) Health checks"
+            echo "5) Health checks"
             pm2 status || true
             pm2 logs "$APP_NAME" --lines 60 --nostream || true
 
             ss -lntp | grep ":$PORT" || echo "Nothing listening on $PORT"
-            timeout 10 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://$HOST:$PORT" || echo "App not responding"
+
+            # Retry a few times because Next can take a moment to become Ready
+            for i in 1 2 3 4 5; do
+              code="$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT" || true)"
+              echo "Health attempt $i, HTTP $code"
+              if [ "$code" = "200" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "App not responding on http://$HOST:$PORT"
+            exit 1
+```
