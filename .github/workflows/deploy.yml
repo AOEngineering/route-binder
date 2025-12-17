@@ -1,3 +1,4 @@
+
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -12,49 +13,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install deps (runner)
-        run: npm ci
-
-      - name: Build (runner)
-        run: npm run build
-
-      - name: Prune to production deps (runner)
-        run: npm prune --omit=dev
-
-      - name: Create release tarball (runner)
-        run: |
-          set -euo pipefail
-          RELEASE="routebinder_${GITHUB_SHA}.tgz"
-          tar -czf "$RELEASE" \
-            .next \
-            public \
-            package.json \
-            package-lock.json \
-            next.config.mjs \
-            node_modules
-          ls -lh "$RELEASE"
-
-      - name: Upload release to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: 5.161.103.30
-          username: root
-          key: ${{ secrets.SSH_KEY }}
-          source: routebinder_${{ github.sha }}.tgz
-          target: /root/route-binder/.incoming
-
-      - name: Activate release on server
+      - name: Deploy via Appleboy SSH Action
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 5.161.103.30
@@ -65,68 +25,131 @@ jobs:
           script: |
             set -euo pipefail
 
+            echo "Deploying RouteBinder, $(date -u)"
+
+            REPO_DIR="/root/route-binder"
             PM2_NAME="route-binder"
             PORT="3012"
             HOST="127.0.0.1"
 
-            DEPLOY_ROOT="/root/route-binder"
-            INCOMING="${DEPLOY_ROOT}/.incoming"
-            RELEASES="${DEPLOY_ROOT}/.releases"
-            CURRENT="${DEPLOY_ROOT}/current"
+            need_cmd () { command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1"; exit 1; }; }
+            need_cmd git
+            need_cmd node
+            need_cmd npm
+            need_cmd pm2
+            need_cmd fuser
 
-            RELEASE_FILE="routebinder_${GITHUB_SHA}.tgz"
-            SRC_TGZ="${INCOMING}/${RELEASE_FILE}"
-
-            mkdir -p "$INCOMING" "$RELEASES"
-
-            if [ ! -f "$SRC_TGZ" ]; then
-              echo "Missing uploaded release: $SRC_TGZ"
-              ls -la "$INCOMING" || true
-              exit 1
-            fi
-
-            TS="$(date -u +%Y%m%d_%H%M%S)"
-            NEW_RELEASE="${RELEASES}/${TS}_${GITHUB_SHA}"
-            mkdir -p "$NEW_RELEASE"
-
-            echo "Stopping PM2 app if present"
-            pm2 stop "$PM2_NAME" >/dev/null 2>&1 || true
-            pm2 delete "$PM2_NAME" >/dev/null 2>&1 || true
-
-            echo "Free port ${PORT}"
-            for i in $(seq 1 10); do
-              if fuser -n tcp "$PORT" >/dev/null 2>&1; then
-                echo "Port in use, killing, attempt ${i}"
-                fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
-                sleep 1
-              else
-                break
+            ensure_swap () {
+              if ! swapon --show | awk '{print $1}' | grep -qx "/swapfile"; then
+                echo "No /swapfile swap active, creating 6G swap"
+                fallocate -l 6G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=6144
+                chmod 600 /swapfile
+                mkswap /swapfile >/dev/null
+                swapon /swapfile
+                grep -q "^/swapfile " /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
               fi
-            done
+              echo "Memory status"
+              free -h
+              swapon --show || true
+            }
 
-            if fuser -n tcp "$PORT" >/dev/null 2>&1; then
-              echo "Port still busy"
-              ss -ltnp 2>/dev/null | grep ":$PORT" || true
-              exit 1
+            free_port () {
+              for i in $(seq 1 10); do
+                if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+                  echo "Port $PORT in use, killing listener, attempt $i"
+                  fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
+                  sleep 1
+                else
+                  echo "Port $PORT is free"
+                  return 0
+                fi
+              done
+              echo "Port $PORT still busy"
+              fuser -n tcp "$PORT" -v 2>/dev/null || true
+              return 1
+            }
+
+            health_check () {
+              node -e "const http=require('http');const url=process.env.URL;let a=0;const m=25;function ping(){a++;const r=http.get(url,res=>{const c=res.statusCode||0;res.resume();if(c>=200&&c<500){console.log('Health OK',c);process.exit(0)}retry()});r.on('error',retry)}function retry(){if(a>=m){console.error('App not responding',url);process.exit(1)}setTimeout(ping,1000)}ping()"
+            }
+
+            ensure_swap
+
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              echo "Cloning repo into $REPO_DIR"
+              rm -rf "$REPO_DIR"
+              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
             fi
 
-            echo "Extract release"
-            tar -xzf "$SRC_TGZ" -C "$NEW_RELEASE"
-            rm -f "$SRC_TGZ"
+            cd "$REPO_DIR"
+            git fetch --all --prune
 
-            echo "Activate symlink"
-            ln -sfn "$NEW_RELEASE" "$CURRENT"
+            BRANCH="${GITHUB_REF_NAME:-}"
+            if [ -z "$BRANCH" ]; then BRANCH="master"; fi
+            if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+              echo "Branch '$BRANCH' not found, falling back"
+              if git show-ref --verify --quiet "refs/remotes/origin/master"; then
+                BRANCH="master"
+              elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
+                BRANCH="main"
+              else
+                echo "No origin/master or origin/main found"
+                git branch -a
+                exit 1
+              fi
+            fi
 
-            echo "Start with PM2 on ${HOST}:${PORT}"
-            cd "$CURRENT"
+            echo "Deploy branch: $BRANCH"
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            git clean -fd
+
+            export NEXT_TELEMETRY_DISABLED=1
+            export NODE_OPTIONS="--max-old-space-size=512"
+            export npm_config_audit=false
+            export npm_config_fund=false
+            export npm_config_progress=false
+            export npm_config_jobs=1
+
+            echo "Install deps only if lock changed"
+            NEW_LOCK_HASH=""
+            if [ -f package-lock.json ]; then
+              NEW_LOCK_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
+            fi
+            OLD_LOCK_HASH=""
+            if [ -f .deploy_lock_hash ]; then
+              OLD_LOCK_HASH="$(cat .deploy_lock_hash || true)"
+            fi
+
+            if [ -z "$NEW_LOCK_HASH" ]; then
+              echo "No package-lock.json found, using npm install"
+              npm install --no-audit --no-fund
+              echo "no_lockfile" > .deploy_lock_hash
+            else
+              if [ "$NEW_LOCK_HASH" != "$OLD_LOCK_HASH" ]; then
+                echo "Lock changed, running npm ci"
+                npm ci --no-audit --no-fund
+                echo "$NEW_LOCK_HASH" > .deploy_lock_hash
+              else
+                echo "Lock unchanged, skipping npm ci"
+              fi
+            fi
+
+            echo "Build"
+            rm -rf .next || true
+            npm run build
+
+            echo "Restart service"
+            pm2 delete "$PM2_NAME" || true
+            free_port
+
             export PORT="$PORT"
             export HOSTNAME="$HOST"
-
-            pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" --time -- start -p "$PORT" -H "$HOST"
-            pm2 save >/dev/null 2>&1 || true
+            pm2 start npm --name "$PM2_NAME" --time -- run start -- -p "$PORT" -H "$HOST"
+            pm2 save || true
 
             echo "Health check"
-            export HEALTH_URL="http://${HOST}:${PORT}"
-            node -e "const http=require('http'); const url=process.env.HEALTH_URL; let a=0; const m=25; function ping(){ a++; const req=http.get(url,res=>{ const c=res.statusCode||0; res.resume(); if(c>=200&&c<500){ console.log('Health OK',c); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(a>=m){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
+            export URL="http://${HOST}:${PORT}"
+            health_check
 
             echo "Deploy complete"
