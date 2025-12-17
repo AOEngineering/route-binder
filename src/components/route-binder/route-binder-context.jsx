@@ -689,7 +689,7 @@ function acceptInboxItemToRoute(inboxId) {
     p.site?.slangName ||
     p.name ||
     item.title ||
-    "Injected stop"
+    p.name
 
   const address = p.address || p.site?.address || ""
   const city = p.city || p.site?.city || ""
