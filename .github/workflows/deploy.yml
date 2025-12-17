@@ -22,6 +22,7 @@ jobs:
           host: 5.161.103.30
           username: root
           key: ${{ secrets.SSH_KEY }}
+          script_stop: true
           script: |
             set -euo pipefail
 
@@ -30,7 +31,7 @@ jobs:
             APP_NAME="route-binder"
             REPO_DIR="/root/route-binder"
             APP_DIR="$REPO_DIR"
-            BRANCH="main"
+            BRANCH="master"
             PORT="3011"
 
             echo ""
