@@ -186,6 +186,18 @@ export function RouteBinderProvider({ children }) {
   const [inboxItems, setInboxItems] = useState([])
   const [routeDoneAtTs, setRouteDoneAtTs] = useState(null)
 
+  function purgeAllState() {
+    setTruck("")
+    setRouteName("")
+    setRouteLabel("")
+    setMode("work")
+    setQueueFilter("all")
+    setStops([])
+    setInboxItems([])
+    setActiveStopId(null)
+    setRouteDoneAtTs(null)
+  }
+
   function applyFallbackSeeds() {
     setTruck("948")
     setRouteName("Route 948")
@@ -211,7 +223,7 @@ export function RouteBinderProvider({ children }) {
 
       if (!r.ok) {
         const txt = await r.text().catch(() => "")
-        throw new Error(txt || "Key not accepted")
+        throw new Error(txt || "Invalid truck key")
       }
 
       const j = await r.json()
@@ -251,8 +263,8 @@ export function RouteBinderProvider({ children }) {
       setBoot({ busy: false, error: "", needsKey: false })
       return true
     } catch (e) {
-      setBoot({ busy: false, error: String(e?.message || e), needsKey: true })
-      applyFallbackSeeds()
+      purgeAllState()
+      setBoot({ busy: false, error: "Invalid truck key", needsKey: true })
       return false
     }
   }
@@ -260,7 +272,9 @@ export function RouteBinderProvider({ children }) {
   async function bindTruckKey(k) {
     const key = String(k || "").trim()
     if (!key) return
-    localStorage.setItem(TRUCK_KEY_STORAGE, key)
+    try {
+      localStorage.setItem(TRUCK_KEY_STORAGE, key)
+    } catch {}
     setTruckKey(key)
     await bootstrapWithKey(key)
   }
@@ -270,21 +284,16 @@ export function RouteBinderProvider({ children }) {
       localStorage.removeItem(TRUCK_KEY_STORAGE)
     } catch {}
     setTruckKey(null)
-    setTruck("")
-    setRouteName("")
-    setRouteLabel("")
-    setStops([])
-    setInboxItems([])
-    setActiveStopId(null)
-    setRouteDoneAtTs(null)
+    purgeAllState()
     setBoot({ busy: false, error: "", needsKey: true })
   }
 
   useEffect(() => {
     const k = localStorage.getItem(TRUCK_KEY_STORAGE)
+
     if (!k) {
+      purgeAllState()
       setBoot({ busy: false, error: "", needsKey: true })
-      applyFallbackSeeds()
       setHydrated(true)
       return
     }
@@ -587,7 +596,7 @@ export function RouteBinderProvider({ children }) {
     clearRouteDone,
   }
 
-  if (boot.needsKey) {
+  if (!hydrated || boot.needsKey || !truck) {
     return <TruckKeyGate busy={boot.busy} error={boot.error} onSubmit={bindTruckKey} />
   }
 

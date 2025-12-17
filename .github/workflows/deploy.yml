@@ -32,7 +32,8 @@ jobs:
             APP_NAME="route-binder"
             REPO_DIR="/root/route-binder"
             APP_DIR="$REPO_DIR"
-            PORT="3011"
+            PORT="3012"
+            HOST="127.0.0.1"
             BRANCH="${GITHUB_REF_NAME:-master}"
 
             echo ""
@@ -75,24 +76,22 @@ jobs:
             npm prune --omit=dev || true
 
             echo ""
-            echo "3) Restart PM2 cleanly"
-            export PORT="$PORT"
-            export HOSTNAME="127.0.0.1"
+            echo "3) Restart PM2 cleanly (force Next to bind to $HOST:$PORT)"
             export NODE_ENV="production"
 
-            # Restart is more deterministic than reload when you just want latest code every time
-            if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-              pm2 restart "$APP_NAME" --update-env
-            else
-              pm2 start npm --name "$APP_NAME" --cwd "$APP_DIR" --time -- start
-            fi
+            # Stop old process if it exists
+            pm2 delete "$APP_NAME" >/dev/null 2>&1 || true
+
+            # Start Next explicitly, so port is never "whatever"
+            pm2 start node --name "$APP_NAME" --cwd "$APP_DIR" --time -- \
+              node_modules/next/dist/bin/next start -H "$HOST" -p "$PORT"
 
             pm2 save || true
 
             echo ""
             echo "4) Health checks"
             pm2 status || true
-            pm2 logs "$APP_NAME" --lines 40 --nostream || true
+            pm2 logs "$APP_NAME" --lines 60 --nostream || true
 
             ss -lntp | grep ":$PORT" || echo "Nothing listening on $PORT"
-            timeout 10 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:$PORT" || echo "App not responding"
+            timeout 10 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://$HOST:$PORT" || echo "App not responding"
