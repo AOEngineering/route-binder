@@ -79,15 +79,32 @@ jobs:
             echo "Build"
             npm run build
 
-            echo "Start or restart with PM2 on ${HOST}:${PORT}"
-            export PORT="$PORT"
-            export HOSTNAME="$HOST"
+            echo "PM2, stop existing app"
+            pm2 delete "$PM2_NAME" || true
+            pm2 save || true
 
-            if pm2 list | grep -q "$PM2_NAME"; then
-              pm2 delete "$PM2_NAME" || true
+            echo "Wait for port ${PORT} to be free"
+            for i in $(seq 1 20); do
+              if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+                echo "Port still in use, attempt $i"
+                sleep 1
+              else
+                echo "Port is free"
+                break
+              fi
+            done
+
+            if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+              echo "Port still stuck, killing holder"
+              fuser -n tcp -k "$PORT" || true
+              sleep 1
             fi
 
+            echo "Start with PM2 on ${HOST}:${PORT}"
+            export PORT="$PORT"
+            export HOSTNAME="$HOST"
             pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" -- start -p "$PORT" -H "$HOST"
+            pm2 flush "$PM2_NAME" || true
             pm2 save
 
             echo "Health check without curl"

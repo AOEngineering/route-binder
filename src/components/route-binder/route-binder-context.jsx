@@ -1,14 +1,36 @@
+
 "use client"
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react"
-import { seedStops } from "@/app/model/seedStops"
-import { seedInboxItems } from "@/app/model/seedInbox"
 import { TruckKeyGate } from "@/components/route-binder/truck-key-gate"
 
 const TRUCK_KEY_STORAGE = "routebinder_truck_key_v1"
 
+function clearRouteBinderStorage() {
+  try {
+    const prefixes = [
+      "routebinder_state_v1_",
+      "routebinder_export_v1_",
+      "routebinder_last_export_v1_",
+    ]
+
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i)
+      if (!k) continue
+      if (k === TRUCK_KEY_STORAGE || prefixes.some(p => k.startsWith(p))) {
+        localStorage.removeItem(k)
+      }
+    }
+  } catch {}
+}
+
+
 function stateStorageKey(truckId) {
   return `routebinder_state_v1_${truckId || "unknown"}`
+}
+
+function exportStorageKey(truckId, doneAtTs) {
+  return `routebinder_export_v1_${truckId || "unknown"}_${doneAtTs || "na"}`
 }
 
 function nowTime() {
@@ -171,6 +193,105 @@ function allowedRoutesForTruck(truckObj) {
   return new Set(routes.map(v => String(v)))
 }
 
+function yyyyMmDdFromTs(ts) {
+  const d = new Date(ts)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}${m}${day}`
+}
+
+function csvEscape(v) {
+  const s = v === null || v === undefined ? "" : String(v)
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function toStopExportRow(s) {
+  const geo = s.site?.geo || {}
+  const checks = s.checks || {}
+  const work = s.work || {}
+  const salt = work.salt || {}
+  const sidewalk = work.sidewalk || {}
+  const plow = work.plow || {}
+
+  return {
+    id: s.id,
+    order: s.order,
+    routeNumber: s.site?.routeNumber || "",
+    name: s.site?.slangName || "",
+    address: s.site?.address || "",
+    city: s.site?.city || "",
+    state: s.site?.state || "",
+    zip: s.site?.zip || "",
+    lat: Number.isFinite(Number(geo.lat)) ? Number(geo.lat) : "",
+    lon: Number.isFinite(Number(geo.lon)) ? Number(geo.lon) : "",
+    geoLabel: geo.label || "",
+    geoSource: geo.source || "",
+
+    timeOpen: s.schedule?.timeOpen || "",
+    timeClosed: s.schedule?.timeClosed || "",
+    serviceDays: s.schedule?.serviceDays || "",
+    firstCompletionTime: s.schedule?.firstCompletionTime || "",
+
+    arrivedAt: s.progress?.arrivedAt || "",
+    arrivedAtTs: Number.isFinite(s.progress?.arrivedAtTs) ? s.progress.arrivedAtTs : "",
+    completeAt: s.progress?.completeAt || "",
+    completeAtTs: Number.isFinite(s.progress?.completeAtTs) ? s.progress.completeAtTs : "",
+    durationSec: Number.isFinite(s.progress?.durationSec) ? s.progress.durationSec : 0,
+
+    injected: Boolean(s.meta?.injected),
+    assist: Boolean(s.meta?.assist),
+
+    plowTargetInches: Number.isFinite(plow.targetInches) ? plow.targetInches : "",
+    plowNotes: plow.notes || "",
+
+    saltProduct: salt.product || "",
+    saltAmount: Number.isFinite(salt.amount) ? salt.amount : "",
+    saltUnit: salt.unit || "",
+    saltPerformedBy: salt.performedBy || "",
+
+    sidewalkProduct: sidewalk.product || "",
+    sidewalkAmount: Number.isFinite(sidewalk.amount) ? sidewalk.amount : "",
+    sidewalkUnit: sidewalk.unit || "",
+    sidewalkPerformedBy: sidewalk.performedBy || "",
+
+    satelliteSalt: work?.satellite?.salt || "",
+
+    plowDone: Boolean(checks.plowDone),
+    saltDone: Boolean(checks.saltDone),
+    sidewalkDone: Boolean(checks.sidewalkDone),
+    satelliteChecked: Boolean(checks.satelliteChecked),
+    photoCaptured: Boolean(checks.photoCaptured),
+
+    specialNotes: s.specialNotes || "",
+    notes: s.notes || "",
+    sheetImageSrc: s.sheet?.imageSrc || "",
+  }
+}
+
+function makeCsv(rows) {
+  if (!rows?.length) return ""
+  const cols = Object.keys(rows[0])
+  const head = cols.map(csvEscape).join(",")
+  const body = rows.map(r => cols.map(c => csvEscape(r[c])).join(",")).join("\n")
+  return `${head}\n${body}\n`
+}
+
+function downloadTextFile(filename, text, mime) {
+  try {
+    const blob = new Blob([text], { type: mime || "text/plain" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch {}
+}
+
 const RouteBinderContext = createContext(null)
 
 export function RouteBinderProvider({ children }) {
@@ -207,10 +328,10 @@ export function RouteBinderProvider({ children }) {
 
   async function bootstrapWithKey(k, opts = {}) {
     const silent = Boolean(opts.silent)
+    const forceFresh = Boolean(opts.forceFresh)
 
     setBoot({ busy: true, error: "", needsKey: false })
 
-    // prevent flash of old truck while fetching
     setStops([])
     setInboxItems([])
     setActiveStopId(null)
@@ -242,13 +363,10 @@ export function RouteBinderProvider({ children }) {
       const hubStopsRaw = Array.isArray(j?.stops) ? j.stops : []
       const hubInboxRaw = Array.isArray(j?.inboxItems) ? j.inboxItems : []
 
-      const hubStopsNorm = hubStopsRaw
-        .map((s, i) => normalizeStop(s, i))
-        .filter(s => allowed.has(String(s.site.routeNumber || "")))
-
+      const hubStopsNorm = hubStopsRaw.map((s, i) => normalizeStop(s, i)).filter(s => allowed.has(String(s.site.routeNumber || "")))
       const hubInboxNorm = hubInboxRaw.map((it, i) => normalizeInboxItem(it, i))
 
-      const stored = loadStoredState(nextTruckId)
+      const stored = forceFresh ? null : loadStoredState(nextTruckId)
 
       const storedOk =
         stored &&
@@ -282,10 +400,8 @@ export function RouteBinderProvider({ children }) {
       } else {
         setMode("work")
         setQueueFilter("all")
-
         setStops(hubStopsNorm)
         setInboxItems(hubInboxNorm)
-
         setActiveStopId(null)
         setRouteDoneAtTs(null)
       }
@@ -323,12 +439,19 @@ export function RouteBinderProvider({ children }) {
   }
 
   function resetTruckKey() {
+  clearRouteBinderStorage()
+  setTruckKey(null)
+  purgeAllState()
+  setBoot({ busy: false, error: "", needsKey: true })
+}
+
+
+  async function startFreshRun() {
+    if (!truck || !truckKey) return
     try {
-      localStorage.removeItem(TRUCK_KEY_STORAGE)
+      localStorage.removeItem(stateStorageKey(truck))
     } catch {}
-    setTruckKey(null)
-    purgeAllState()
-    setBoot({ busy: false, error: "", needsKey: true })
+    await bootstrapWithKey(truckKey, { silent: true, forceFresh: true })
   }
 
   useEffect(() => {
@@ -348,7 +471,6 @@ export function RouteBinderProvider({ children }) {
 
     setTruckKey(k)
     bootstrapWithKey(k, { silent: true }).finally(() => setHydrated(true))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const sortedStops = useMemo(() => stops.slice().sort((a, b) => a.order - b.order), [stops])
@@ -544,51 +666,251 @@ export function RouteBinderProvider({ children }) {
     setInboxItems(prev => prev.filter(it => it.id !== inboxId))
   }
 
-  function acceptInboxItemToRoute(inboxId) {
-    const item = inboxItems.find(i => i.id === inboxId)
-    if (!item) return
+function acceptInboxItemToRoute(inboxId) {
+  const item = inboxItems.find(i => i.id === inboxId)
+  if (!item) return
 
-    const p = item.payload || {}
-    const w = parseWindow(p.window || "")
-    const newStopId = `stop_injected_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+  const p = item.payload || {}
 
-    const newStop = normalizeStop(
-      {
-        id: newStopId,
-        order: 9999,
-        meta: { injected: true, assist: Boolean(p.assist) },
-        site: {
-          routeNumber: String(truck || ""),
-          slangName: p.name || item.title || "Injected stop",
-          address: p.address || "",
-          city: p.city || "",
-          state: p.state || "OH",
-          zip: p.zip || "",
-          geo: { lat: null, lon: null, label: "", source: "" },
-        },
-        schedule: { serviceDays: "", firstCompletionTime: "", timeOpen: w.timeOpen, timeClosed: w.timeClosed },
-        work: {
-          plow: { targetInches: null, notes: "" },
-          salt: { product: p.saltSpec || "", amount: null, unit: "scoops", performedBy: "you" },
-          sidewalk: { product: p.shovelSpec || "", amount: null, unit: "bags", performedBy: "you" },
-          satellite: { salt: "" },
-        },
-        specialNotes: "",
-        sheet: { imageSrc: "" },
+  const w = parseWindow(p.window || "")
+  const timeOpen = p.timeOpen || p.schedule?.timeOpen || w.timeOpen
+  const timeClosed = p.timeClosed || p.schedule?.timeClosed || w.timeClosed
+
+  const serviceDays = p.serviceDays || p.schedule?.serviceDays || ""
+  const firstCompletionTime = p.firstCompletionTime || p.schedule?.firstCompletionTime || ""
+
+  const routeNumber =
+    p.routeNumber ||
+    p.site?.routeNumber ||
+    String(truck || "")
+
+  const slangName =
+    p.slangName ||
+    p.site?.slangName ||
+    p.name ||
+    item.title ||
+    "Injected stop"
+
+  const address = p.address || p.site?.address || ""
+  const city = p.city || p.site?.city || ""
+  const state = p.state || p.site?.state || "OH"
+  const zip = p.zip || p.site?.zip || ""
+
+  const sheetImageSrc = p.sheetImageSrc || p.sheet?.imageSrc || ""
+  const sheetLegend = Array.isArray(p.sheet?.legend) ? p.sheet.legend : []
+
+  const plowTargetInches = Number.isFinite(Number(p.work?.plow?.targetInches)) ? Number(p.work.plow.targetInches) : null
+  const plowNotes = p.work?.plow?.notes || ""
+
+  const saltProduct = p.work?.salt?.product || p.saltSpec || ""
+  const saltAmount = Number.isFinite(Number(p.work?.salt?.amount)) ? Number(p.work.salt.amount) : null
+  const saltUnit = p.work?.salt?.unit || "scoops"
+  const saltPerformedBy = p.work?.salt?.performedBy || "you"
+
+  const sidewalkProduct = p.work?.sidewalk?.product || p.shovelSpec || ""
+  const sidewalkAmount = Number.isFinite(Number(p.work?.sidewalk?.amount)) ? Number(p.work.sidewalk.amount) : null
+  const sidewalkUnit = p.work?.sidewalk?.unit || "bags"
+  const sidewalkPerformedBy = p.work?.sidewalk?.performedBy || "you"
+
+  const satelliteSalt = p.work?.satellite?.salt || ""
+
+  const newStopId = `stop_injected_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+
+  const newStop = normalizeStop(
+    {
+      id: newStopId,
+      order: 9999,
+      meta: { injected: true, assist: Boolean(p.assist) },
+
+      sheet: { imageSrc: sheetImageSrc, legend: sheetLegend },
+
+      site: {
+        routeNumber: String(routeNumber || ""),
+        slangName,
+        address,
+        city,
+        state,
+        zip,
+        geo: { lat: null, lon: null, label: "", source: "" },
       },
-      999
-    )
 
-    setStops(prev => {
-      const list = prev.slice().sort((a, b) => a.order - b.order)
-      const idx = list.findIndex(s => s.id === activeStopId)
-      const insertAt = idx >= 0 ? idx + 1 : list.length
-      list.splice(insertAt, 0, newStop)
-      return renumberOrders(list)
-    })
+      schedule: {
+        serviceDays,
+        firstCompletionTime,
+        timeOpen,
+        timeClosed,
+      },
 
-    setInboxItems(prev => prev.filter(it => it.id !== inboxId))
-    clearRouteDone()
+      work: {
+        plow: { targetInches: plowTargetInches, notes: plowNotes },
+        salt: { product: saltProduct, amount: saltAmount, unit: saltUnit, performedBy: saltPerformedBy },
+        sidewalk: { product: sidewalkProduct, amount: sidewalkAmount, unit: sidewalkUnit, performedBy: sidewalkPerformedBy },
+        satellite: { salt: satelliteSalt },
+      },
+
+      specialNotes: p.specialNotes || "",
+    },
+    999
+  )
+
+  setStops(prev => {
+    const list = prev.slice().sort((a, b) => a.order - b.order)
+    const idx = list.findIndex(s => s.id === activeStopId)
+    const insertAt = idx >= 0 ? idx + 1 : list.length
+    list.splice(insertAt, 0, newStop)
+    return renumberOrders(list)
+  })
+
+  setInboxItems(prev => prev.filter(it => it.id !== inboxId))
+  clearRouteDone()
+}
+
+
+  const routeSummary = useMemo(() => {
+    if (!sortedStops.length) return null
+
+    const completedStops = sortedStops.filter(s => Boolean(s?.progress?.completeAtTs))
+    const arrivedStops = sortedStops.filter(s => Boolean(s?.progress?.arrivedAtTs))
+
+    const firstArriveTs = arrivedStops.length
+      ? Math.min(...arrivedStops.map(s => Number(s.progress.arrivedAtTs)).filter(Number.isFinite))
+      : null
+
+    const lastCompleteTs = completedStops.length
+      ? Math.max(...completedStops.map(s => Number(s.progress.completeAtTs)).filter(Number.isFinite))
+      : null
+
+    const endTs = Number.isFinite(routeDoneAtTs) ? routeDoneAtTs : lastCompleteTs
+    const startTs = firstArriveTs
+
+    const onSiteSec = completedStops.reduce((acc, s) => acc + (Number(s.progress.durationSec) || 0), 0)
+
+    const routeSpanSec =
+      Number.isFinite(startTs) && Number.isFinite(endTs) && endTs >= startTs
+        ? Math.floor((endTs - startTs) / 1000)
+        : 0
+
+    const injectedCount = sortedStops.filter(s => Boolean(s?.meta?.injected)).length
+    const assistCount = sortedStops.filter(s => Boolean(s?.meta?.assist)).length
+
+    const saltStops = sortedStops.filter(s => requiresSalt(s)).length
+    const sidewalkStops = sortedStops.filter(s => requiresSidewalk(s)).length
+
+    const saltTotal = sortedStops.reduce((acc, s) => {
+      const n = s?.work?.salt?.amount
+      if (!Number.isFinite(n)) return acc
+      return acc + n
+    }, 0)
+
+    const sidewalkTotal = sortedStops.reduce((acc, s) => {
+      const n = s?.work?.sidewalk?.amount
+      if (!Number.isFinite(n)) return acc
+      return acc + n
+    }, 0)
+
+    const allComplete = sortedStops.length > 0 && sortedStops.every(s => Boolean(s?.progress?.completeAtTs))
+
+    return {
+      truck,
+      routeName,
+      routeLabel,
+
+      allComplete,
+      totalStops: sortedStops.length,
+      completedStops: completedStops.length,
+
+      startedAtTs: Number.isFinite(startTs) ? startTs : null,
+      endedAtTs: Number.isFinite(endTs) ? endTs : null,
+
+      routeSpanSec,
+      onSiteSec,
+
+      injectedCount,
+      assistCount,
+
+      saltStops,
+      sidewalkStops,
+      saltTotal,
+      sidewalkTotal,
+
+      inboxRemaining: inboxItems.length,
+    }
+  }, [sortedStops, routeDoneAtTs, truck, routeName, routeLabel, inboxItems.length])
+
+  function buildRouteExportPayload() {
+    const now = Date.now()
+    const summary = routeSummary
+    const rows = sortedStops.map(toStopExportRow)
+
+    const startedAtTs = summary?.startedAtTs ?? null
+    const endedAtTs = summary?.endedAtTs ?? null
+
+    return {
+      version: 1,
+      exportedAtTs: now,
+
+      truckId: truck,
+      routeName,
+      routeLabel,
+
+      routeDoneAtTs: Number.isFinite(routeDoneAtTs) ? routeDoneAtTs : null,
+      startedAtTs,
+      endedAtTs,
+
+      summary: summary || null,
+
+      inboxRemaining: inboxItems.map(it => ({
+        id: it.id,
+        from: it.from,
+        receivedAt: it.receivedAt,
+        title: it.title,
+        hint: it.hint,
+        payload: it.payload || {},
+      })),
+
+      stops: rows,
+    }
+  }
+
+  function saveExportSnapshot(payload) {
+    const doneTs = Number.isFinite(routeDoneAtTs) ? routeDoneAtTs : Date.now()
+    try {
+      localStorage.setItem(exportStorageKey(truck, doneTs), JSON.stringify(payload))
+      localStorage.setItem(`routebinder_last_export_v1_${truck}`, JSON.stringify({ doneTs }))
+    } catch {}
+  }
+
+  function exportRouteJson() {
+    if (!truck) return
+    const payload = buildRouteExportPayload()
+    saveExportSnapshot(payload)
+
+    const tsForName =
+      payload.startedAtTs || payload.endedAtTs || payload.routeDoneAtTs || payload.exportedAtTs || Date.now()
+
+    const datePart = yyyyMmDdFromTs(tsForName)
+    const namePart = payload.routeName ? String(payload.routeName).replace(/\s+/g, "_") : `route_${truck}`
+    const filename = `${namePart}_${truck}_${datePart}.json`
+
+    downloadTextFile(filename, JSON.stringify(payload, null, 2), "application/json")
+  }
+
+  function exportRouteCsv() {
+    if (!truck) return
+    const payload = buildRouteExportPayload()
+    saveExportSnapshot(payload)
+
+    const rows = Array.isArray(payload.stops) ? payload.stops : []
+    const csv = makeCsv(rows)
+
+    const tsForName =
+      payload.startedAtTs || payload.endedAtTs || payload.routeDoneAtTs || payload.exportedAtTs || Date.now()
+
+    const datePart = yyyyMmDdFromTs(tsForName)
+    const namePart = payload.routeName ? String(payload.routeName).replace(/\s+/g, "_") : `route_${truck}`
+    const filename = `${namePart}_${truck}_${datePart}.csv`
+
+    downloadTextFile(filename, csv, "text/csv")
   }
 
   const value = {
@@ -599,6 +921,8 @@ export function RouteBinderProvider({ children }) {
 
     bindTruckKey,
     resetTruckKey,
+
+    startFreshRun,
 
     mode,
     setMode,
@@ -645,6 +969,10 @@ export function RouteBinderProvider({ children }) {
 
     routeDoneAtTs,
     clearRouteDone,
+
+    routeSummary,
+    exportRouteJson,
+    exportRouteCsv,
   }
 
   if (!hydrated || boot.needsKey || !truck) {

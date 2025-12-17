@@ -1,6 +1,5 @@
 //src/app/route-binder/page.jsx
 
-
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -335,6 +334,10 @@ function InboxCard({ item, onAccept, onReject }) {
 
 export default function RouteBinderPage() {
   const {
+    truck,
+    routeName,
+    routeLabel,
+
     sortedStops,
     activeStopId,
     setActiveStopId,
@@ -360,6 +363,11 @@ export default function RouteBinderPage() {
 
     routeDoneAtTs,
     clearRouteDone,
+
+    routeSummary,
+    exportRouteJson,
+    exportRouteCsv,
+    startFreshRun,
 
     nextStop,
   } = useRouteBinder()
@@ -683,16 +691,74 @@ export default function RouteBinderPage() {
               <Panel
                 title="Work completed"
                 right={
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button variant="outline" onClick={clearRouteDone}>Dismiss</Button>
+                    <Button variant="outline" onClick={exportRouteCsv}>Export CSV</Button>
+                    <Button variant="secondary" onClick={exportRouteJson}>Export JSON</Button>
+                    <Button variant="outline" onClick={startFreshRun}>New run</Button>
                     <Button variant="secondary" onClick={() => setMode("inbox")}>Open inbox</Button>
                   </div>
                 }
                 className="mb-2"
               >
                 <div className="text-sm text-zinc-600 dark:text-zinc-300">
-                  No more stops in the queue.
+                  Route is complete. Export the run, then start fresh when you are ready.
                 </div>
+
+                {routeSummary ? (
+                  <>
+                    <Separator className="my-2" />
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      <StatTile label="Truck" value={truck || "?"} sub={routeName || routeLabel || ""} />
+                      <StatTile
+                        label="Stops"
+                        value={`${routeSummary.completedStops} of ${routeSummary.totalStops}`}
+                        sub={routeSummary.allComplete ? "All complete" : "Some incomplete"}
+                      />
+                      <StatTile
+                        label="Route span"
+                        value={formatDuration(routeSummary.routeSpanSec)}
+                        sub="First arrival to finish"
+                      />
+                      <StatTile
+                        label="On site time"
+                        value={formatDuration(routeSummary.onSiteSec)}
+                        sub="Sum of stop timers"
+                      />
+
+                      <StatTile label="Injected" value={routeSummary.injectedCount} />
+                      <StatTile label="Assist" value={routeSummary.assistCount} />
+                      <StatTile
+                        label="Salt stops"
+                        value={routeSummary.saltStops}
+                        sub={Number.isFinite(routeSummary.saltTotal) && routeSummary.saltTotal > 0 ? `Total ${routeSummary.saltTotal}` : ""}
+                      />
+                      <StatTile
+                        label="Sidewalk stops"
+                        value={routeSummary.sidewalkStops}
+                        sub={Number.isFinite(routeSummary.sidewalkTotal) && routeSummary.sidewalkTotal > 0 ? `Total ${routeSummary.sidewalkTotal}` : ""}
+                      />
+                    </div>
+
+                    {inboxItems?.length ? (
+                      <>
+                        <Separator className="my-2" />
+                        <div className="text-xs text-zinc-500">
+                          Inbox still has {inboxItems.length} item{inboxItems.length === 1 ? "" : "s"}.
+                          If dispatch sent anything late, it is still here.
+                        </div>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <Separator className="my-2" />
+                    <div className="text-xs text-zinc-500">
+                      Summary is not available yet. Finish at least one stop with Arrived and Complete to generate timing.
+                    </div>
+                  </>
+                )}
               </Panel>
             ) : null}
 
@@ -735,7 +801,7 @@ export default function RouteBinderPage() {
                     <StatTile label="First" value={schedule.firstCompletionTime || "?"} />
                   </div>
 
-                  {active.specialNotes ? (
+                  {active?.specialNotes ? (
                     <>
                       <Separator className="my-2" />
                       <div className="text-xs text-zinc-500">Special</div>
