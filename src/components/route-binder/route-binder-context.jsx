@@ -394,7 +394,7 @@ export function RouteBinderProvider({ children }) {
 
       setBoot({ busy: false, error: "", needsKey: false })
       return true
-    } catch (e) {
+    } catch {
       try {
         localStorage.removeItem(TRUCK_KEY_STORAGE)
       } catch {}
@@ -635,24 +635,23 @@ export function RouteBinderProvider({ children }) {
     if (prevStop) setActiveStopId(prevStop.id)
   }
 
-function goNextLocked() {
-  if (!activeStop) return
+  function goNextLocked() {
+    if (!activeStop) return
 
-  const completed = Boolean(activeStop?.progress?.completeAtTs)
-  if (!completed) return
+    const completed = Boolean(activeStop?.progress?.completeAtTs)
+    if (!completed) return
 
-  // If you jumped ahead to a future stop, do not allow advancing from there
-  const isFuture = Boolean(operableStopId && activeStopId && activeStopId !== operableStopId && !completed)
-  if (isFuture) return
+    const isFuture = Boolean(operableStopId && activeStopId && activeStopId !== operableStopId && !completed)
+    if (isFuture) return
 
-  if (nextStop) {
-    setActiveStopId(nextStop.id)
-    clearRouteDone()
-    return
+    if (nextStop) {
+      setActiveStopId(nextStop.id)
+      clearRouteDone()
+      return
+    }
+
+    setRouteDoneAtTs(Date.now())
   }
-
-  setRouteDoneAtTs(Date.now())
-}
 
   async function geocodeActiveStop() {
     if (!activeStop) return
@@ -678,89 +677,88 @@ function goNextLocked() {
     setInboxItems(prev => prev.filter(it => it.id !== inboxId))
   }
 
-function acceptInboxItemToRoute(inboxId) {
-  const item = inboxItems.find(i => i.id === inboxId)
-  if (!item) return
+  function acceptInboxItemToRoute(inboxId) {
+    const item = inboxItems.find(i => i.id === inboxId)
+    if (!item) return
 
-  const p = item.payload || {}
+    const p = item.payload || {}
 
-  const w = parseWindow(p.window || "")
-  const timeOpen = p.timeOpen || p.schedule?.timeOpen || w.timeOpen
-  const timeClosed = p.timeClosed || p.schedule?.timeClosed || w.timeClosed
+    const w = parseWindow(p.window || "")
+    const timeOpen = p.timeOpen || p.schedule?.timeOpen || w.timeOpen
+    const timeClosed = p.timeClosed || p.schedule?.timeClosed || w.timeClosed
 
-  const serviceDays = p.serviceDays || p.schedule?.serviceDays || ""
-  const firstCompletionTime = p.firstCompletionTime || p.schedule?.firstCompletionTime || ""
+    const serviceDays = p.serviceDays || p.schedule?.serviceDays || ""
+    const firstCompletionTime = p.firstCompletionTime || p.schedule?.firstCompletionTime || ""
 
-  const routeNumber = p.routeNumber || p.site?.routeNumber || String(truck || "")
-  const slangName = p.slangName || p.site?.slangName || p.name || item.title || p.name
+    const routeNumber = p.routeNumber || p.site?.routeNumber || String(truck || "")
+    const slangName = p.slangName || p.site?.slangName || p.name || item.title || p.name
 
-  const address = p.address || p.site?.address || ""
-  const city = p.city || p.site?.city || ""
-  const state = p.state || p.site?.state || "OH"
-  const zip = p.zip || p.site?.zip || ""
+    const address = p.address || p.site?.address || ""
+    const city = p.city || p.site?.city || ""
+    const state = p.state || p.site?.state || "OH"
+    const zip = p.zip || p.site?.zip || ""
 
-  const sheetImageSrc = p.sheetImageSrc || p.sheet?.imageSrc || ""
-  const sheetLegend = Array.isArray(p.sheet?.legend) ? p.sheet.legend : []
+    const sheetImageSrc = p.sheetImageSrc || p.sheet?.imageSrc || ""
+    const sheetLegend = Array.isArray(p.sheet?.legend) ? p.sheet.legend : []
 
-  const plowTargetInches = Number.isFinite(Number(p.work?.plow?.targetInches)) ? Number(p.work.plow.targetInches) : null
-  const plowNotes = p.work?.plow?.notes || ""
+    const plowTargetInches = Number.isFinite(Number(p.work?.plow?.targetInches)) ? Number(p.work.plow.targetInches) : null
+    const plowNotes = p.work?.plow?.notes || ""
 
-  const saltProduct = p.work?.salt?.product || p.saltSpec || ""
-  const saltAmount = Number.isFinite(Number(p.work?.salt?.amount)) ? Number(p.work.salt.amount) : null
-  const saltUnit = p.work?.salt?.unit || "scoops"
-  const saltPerformedBy = p.work?.salt?.performedBy || "you"
+    const saltProduct = p.work?.salt?.product || p.saltSpec || ""
+    const saltAmount = Number.isFinite(Number(p.work?.salt?.amount)) ? Number(p.work.salt.amount) : null
+    const saltUnit = p.work?.salt?.unit || "scoops"
+    const saltPerformedBy = p.work?.salt?.performedBy || "you"
 
-  const sidewalkProduct = p.work?.sidewalk?.product || p.shovelSpec || ""
-  const sidewalkAmount = Number.isFinite(Number(p.work?.sidewalk?.amount)) ? Number(p.work.sidewalk.amount) : null
-  const sidewalkUnit = p.work?.sidewalk?.unit || "bags"
-  const sidewalkPerformedBy = p.work?.sidewalk?.performedBy || "you"
+    const sidewalkProduct = p.work?.sidewalk?.product || p.shovelSpec || ""
+    const sidewalkAmount = Number.isFinite(Number(p.work?.sidewalk?.amount)) ? Number(p.work.sidewalk.amount) : null
+    const sidewalkUnit = p.work?.sidewalk?.unit || "bags"
+    const sidewalkPerformedBy = p.work?.sidewalk?.performedBy || "you"
 
-  const satelliteSalt = p.work?.satellite?.salt || ""
+    const satelliteSalt = p.work?.satellite?.salt || ""
 
-  const newStopId = `stop_injected_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+    const newStopId = `stop_injected_${Date.now()}_${Math.floor(Math.random() * 10000)}`
 
-  const newStop = normalizeStop(
-    {
-      id: newStopId,
-      order: 9999,
-      meta: { injected: true, assist: Boolean(p.assist) },
+    const newStop = normalizeStop(
+      {
+        id: newStopId,
+        order: 9999,
+        meta: { injected: true, assist: Boolean(p.assist) },
 
-      sheet: { imageSrc: sheetImageSrc, legend: sheetLegend },
+        sheet: { imageSrc: sheetImageSrc, legend: sheetLegend },
 
-      site: {
-        routeNumber: String(routeNumber || ""),
-        slangName,
-        address,
-        city,
-        state,
-        zip,
-        geo: { lat: null, lon: null, label: "", source: "" },
+        site: {
+          routeNumber: String(routeNumber || ""),
+          slangName,
+          address,
+          city,
+          state,
+          zip,
+          geo: { lat: null, lon: null, label: "", source: "" },
+        },
+
+        schedule: { serviceDays, firstCompletionTime, timeOpen, timeClosed },
+
+        work: {
+          plow: { targetInches: plowTargetInches, notes: plowNotes },
+          salt: { product: saltProduct, amount: saltAmount, unit: saltUnit, performedBy: saltPerformedBy },
+          sidewalk: { product: sidewalkProduct, amount: sidewalkAmount, unit: sidewalkUnit, performedBy: sidewalkPerformedBy },
+          satellite: { salt: satelliteSalt },
+        },
+
+        specialNotes: p.specialNotes || "",
       },
+      999
+    )
 
-      schedule: { serviceDays, firstCompletionTime, timeOpen, timeClosed },
+    setStops(prev => {
+      const list = prev.slice().sort((a, b) => a.order - b.order)
+      list.push(newStop)
+      return renumberOrders(list)
+    })
 
-      work: {
-        plow: { targetInches: plowTargetInches, notes: plowNotes },
-        salt: { product: saltProduct, amount: saltAmount, unit: saltUnit, performedBy: saltPerformedBy },
-        sidewalk: { product: sidewalkProduct, amount: sidewalkAmount, unit: sidewalkUnit, performedBy: sidewalkPerformedBy },
-        satellite: { salt: satelliteSalt },
-      },
-
-      specialNotes: p.specialNotes || "",
-    },
-    999
-  )
-
-  setStops(prev => {
-    const list = prev.slice().sort((a, b) => a.order - b.order)
-    list.push(newStop)
-    return renumberOrders(list)
-  })
-
-  setInboxItems(prev => prev.filter(it => it.id !== inboxId))
-  clearRouteDone()
-}
-
+    setInboxItems(prev => prev.filter(it => it.id !== inboxId))
+    clearRouteDone()
+  }
 
   const routeSummary = useMemo(() => {
     if (!sortedStops.length) return null

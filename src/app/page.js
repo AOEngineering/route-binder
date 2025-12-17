@@ -1,8 +1,8 @@
+
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic"
-import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
@@ -17,6 +17,65 @@ const StopMap = dynamic(() => import("@/components/stop-map"), {
   ),
 })
 
+async function readJpegExifOrientation(src) {
+  try {
+    const r = await fetch(src, { cache: "force-cache" })
+    if (!r.ok) return 1
+    const buf = await r.arrayBuffer()
+    const view = new DataView(buf)
+
+    if (view.byteLength < 4) return 1
+    if (view.getUint16(0, false) !== 0xffd8) return 1
+
+    let offset = 2
+    while (offset + 4 < view.byteLength) {
+      const marker = view.getUint16(offset, false)
+      offset += 2
+
+      if (marker === 0xffd9 || marker === 0xffda) break
+
+      const size = view.getUint16(offset, false)
+      if (size < 2) break
+
+      if (marker === 0xffe1) {
+        const exifStart = offset + 2
+        if (view.getUint32(exifStart, false) !== 0x45786966) return 1
+
+        const tiff = exifStart + 6
+        const endian = view.getUint16(tiff, false)
+        const little = endian === 0x4949
+        if (!little && endian !== 0x4d4d) return 1
+        if (view.getUint16(tiff + 2, little) !== 0x002a) return 1
+
+        const firstIfd = view.getUint32(tiff + 4, little)
+        let dirStart = tiff + firstIfd
+        if (dirStart + 2 > view.byteLength) return 1
+
+        const entries = view.getUint16(dirStart, little)
+        for (let i = 0; i < entries; i++) {
+          const ent = dirStart + 2 + i * 12
+          if (ent + 12 > view.byteLength) break
+          const tag = view.getUint16(ent, little)
+          if (tag === 0x0112) {
+            const val = view.getUint16(ent + 8, little)
+            return val
+          }
+        }
+        return 1
+      }
+
+      offset += size
+    }
+  } catch {}
+  return 1
+}
+
+function exifToRotDeg(orientation) {
+  if (orientation === 3) return 180
+  if (orientation === 6) return 90
+  if (orientation === 8) return 270
+  return 0
+}
 
 function cx(...parts) {
   return parts.filter(Boolean).join(" ")
@@ -54,7 +113,7 @@ function statusOf(stop) {
 function statusPill(status) {
   if (status === "complete") return { label: "Complete", className: "bg-emerald-600 text-white" }
   if (status === "arrived") return { label: "On site", className: "bg-sky-600 text-white" }
-  return { label: "Up next", className: "bg-zinc-800 text-white" }
+  return { label: "Up next", className: "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" }
 }
 
 function wxLabel(code) {
@@ -139,7 +198,9 @@ function TaskRow({ title, detail, done, disabled, onToggle }) {
           <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">{title}</div>
           {detail ? <div className="mt-0.5 text-xs text-zinc-500 truncate">{detail}</div> : null}
         </div>
-        <Badge className={done ? "bg-emerald-600 text-white" : "bg-zinc-800 text-white"}>{done ? "Done" : "Tap"}</Badge>
+        <Badge className={done ? "bg-emerald-600 text-white" : "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"}>
+          {done ? "Done" : "Tap"}
+        </Badge>
       </div>
     </button>
   )
@@ -163,13 +224,6 @@ function Segmented({ value, onChange, items }) {
       ))}
     </div>
   )
-}
-
-function stopChipClass(status, active) {
-  if (active) return "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-  if (status === "complete") return "bg-emerald-600 text-white"
-  if (status === "arrived") return "bg-sky-600 text-white"
-  return "bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
 }
 
 function SheetOverlay({ open, onClose, src, title, state, setState }) {
@@ -269,13 +323,13 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
   return (
     <div className="fixed inset-0 z-[60] bg-black/85">
       <div className="flex h-full flex-col">
-        <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-white">
+        <div className="flex flex-col gap-2 border-b border-white/10 px-3 py-2 text-white md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
             <div className="text-sm font-semibold truncate">{title || "Route sheet"}</div>
             <div className="text-xs text-white/70 truncate">{src}</div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 1.15), x, y, rot })}>
               Zoom in
             </Button>
@@ -289,7 +343,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
               Rotate right
             </Button>
             <Button variant="secondary" onClick={reset}>
-              Reset
+              Reset view
             </Button>
             <Button onClick={onClose}>Close</Button>
           </div>
@@ -303,27 +357,34 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
           onClick={onDoubleTapMaybe}
+          style={{ touchAction: "none" }}
         >
           <div
             className="absolute left-1/2 top-1/2"
             style={{
               transform: `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${rot}deg) scale(${scale})`,
               transformOrigin: "center center",
-              touchAction: "none",
             }}
           >
-            <img src={src} alt={title || "Route sheet"} className="max-h-[88vh] max-w-[92vw] select-none" draggable={false} />
+            <img
+              src={src}
+              alt={title || "Route sheet"}
+              className="max-h-[92vh] max-w-[98vw] select-none"
+              draggable={false}
+              style={{
+                imageOrientation: "none",
+              }}
+            />
           </div>
 
           <div className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
-            Drag to pan, pinch or wheel to zoom, double tap to reset
+            Drag to pan, pinch to zoom, double tap to reset
           </div>
         </div>
       </div>
     </div>
   )
 }
-
 
 export default function RouteBinderPage() {
   const {
@@ -362,6 +423,7 @@ export default function RouteBinderPage() {
     startFreshRun,
 
     nextStop,
+    prevStop,
     operableStopId,
   } = useRouteBinder()
 
@@ -410,7 +472,6 @@ export default function RouteBinderPage() {
   const completed = Boolean(active?.progress?.completeAtTs)
   const arrived = Boolean(active?.progress?.arrivedAtTs)
 
-  // Only "view only" for future stops, not for completed history
   const viewOnly = Boolean(active?.id && operableStopId && active.id !== operableStopId && !completed)
 
   function patch(p) {
@@ -529,8 +590,6 @@ export default function RouteBinderPage() {
   const satelliteDetail = work?.satellite?.salt ? `Salt: ${work.satellite.salt}` : ""
 
   const canFinish = Boolean(active && canComplete(active))
-
-  // Work edits are still locked until arrived, and after completion
   const lockWork = viewOnly || !arrived || completed
 
   const wxCurrent = wx?.current || null
@@ -545,37 +604,124 @@ export default function RouteBinderPage() {
   }, [schedule.serviceDays, schedule.firstCompletionTime, schedule.timeOpen, schedule.timeClosed])
 
   const sheetSrc = active?.sheet?.imageSrc || ""
-  const sheetTransform = sheetTransforms[active?.id] || { scale: 1, x: 0, y: 0, rot: 0 }
-
-  function setSheetTransform(next) {
-    if (!active?.id) return
-    setSheetTransforms(prev => ({ ...prev, [active.id]: next }))
-  }
+  const sheetTransform = sheetTransforms[active?.id] || { scale: 1, x: 0, y: 0, rot: 0, _autoDone: false, _autoKey: "" }
 
   function normalizeRot(v) {
     const n = Number(v) || 0
     return ((n % 360) + 360) % 360
   }
 
+  function setSheetTransform(next) {
+    if (!active?.id) return
+    setSheetTransforms(prev => {
+      const cur = prev[active.id] || {}
+      return {
+        ...prev,
+        [active.id]: {
+          ...cur,
+          ...next,
+          _autoDone: true,
+          _autoKey: sheetSrc || cur._autoKey || "",
+        },
+      }
+    })
+  }
+
   function rotateSheet(deltaDeg) {
-    setSheetTransform({ ...sheetTransform, rot: normalizeRot((sheetTransform.rot || 0) + deltaDeg) })
+    setSheetTransform({ rot: normalizeRot((sheetTransform.rot || 0) + deltaDeg) })
   }
 
   function resetSheet() {
     setSheetTransform({ scale: 1, x: 0, y: 0, rot: 0 })
   }
 
-  // rotation and perfect fit preview logic
   const sheetRot = Number.isFinite(sheetTransform?.rot) ? sheetTransform.rot : 0
   const quarterTurn = Math.abs(Math.round(sheetRot / 90)) % 2 === 1
 
-  const dims = sheetDims[active?.id] || { w: 1600, h: 1000 }
-  const baseW = Number(dims.w) > 0 ? Number(dims.w) : 1600
-  const baseH = Number(dims.h) > 0 ? Number(dims.h) : 1000
-  const viewportAspect = quarterTurn ? `${baseH} / ${baseW}` : `${baseW} / ${baseH}`
+  function getPreviewAspect(stopId, rotDeg) {
+    const d = stopId ? sheetDims[stopId] : null
+    const w = Number(d?.w)
+    const h = Number(d?.h)
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return "16 / 10"
+    const r = normalizeRot(rotDeg || 0)
+    const swap = Math.abs(Math.round(r / 90)) % 2 === 1
+    const effW = swap ? h : w
+    const effH = swap ? w : h
+    if (!Number.isFinite(effW) || !Number.isFinite(effH) || effW <= 0 || effH <= 0) return "16 / 10"
+    const landscapeW = Math.max(effW, effH)
+    const landscapeH = Math.min(effW, effH)
+    return `${Math.round(landscapeW)} / ${Math.round(landscapeH)}`
+  }
+
+  // Auto orient, fixes upside down by trusting EXIF and forcing browser to not auto rotate
+  const exifRotCacheRef = useRef(new Map())
+
+  async function maybeAutoOrient(stopId, src, naturalW, naturalH) {
+    if (!stopId || !src) return
+
+    const w = Number(naturalW)
+    const h = Number(naturalH)
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return
+
+    const cur = sheetTransforms?.[stopId]
+    if (cur?._autoDone && cur?._autoKey === src) return
+
+    let exifRot = 0
+    const cacheKey = String(src)
+
+    if (exifRotCacheRef.current.has(cacheKey)) {
+      exifRot = exifRotCacheRef.current.get(cacheKey)
+    } else {
+      const ori = await readJpegExifOrientation(src)
+      exifRot = exifToRotDeg(ori)
+      exifRotCacheRef.current.set(cacheKey, exifRot)
+    }
+
+    // After applying EXIF, force landscape if still portrait
+    let baseRot = normalizeRot(exifRot)
+    const swap = Math.abs(Math.round(baseRot / 90)) % 2 === 1
+    const effW = swap ? h : w
+    const effH = swap ? w : h
+
+    let desiredRot = baseRot
+    if (effH > effW) desiredRot = normalizeRot(baseRot + 90)
+
+    setSheetTransforms(prev => {
+      const nowCur = prev[stopId]
+      if (nowCur?._autoDone && nowCur?._autoKey === src) return prev
+      return {
+        ...prev,
+        [stopId]: {
+          ...(nowCur || { scale: 1, x: 0, y: 0, rot: 0 }),
+          rot: desiredRot,
+          _autoDone: true,
+          _autoKey: src,
+        },
+      }
+    })
+  }
 
   const isDoneBanner = Boolean(routeDoneAtTs)
   const hasNext = Boolean(nextStop)
+
+  function jumpToStop(id) {
+    if (!id) return
+    clearRouteDone()
+    setMode("work")
+    setSheetLoading(true)
+    setSwitchState({ busy: true, targetId: id, startTs: Date.now() })
+    selectStop(id)
+  }
+
+  const chipRefs = useRef({})
+  useEffect(() => {
+    const el = chipRefs.current?.[activeStopId]
+    if (el?.scrollIntoView) {
+      try {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" })
+      } catch {}
+    }
+  }, [activeStopId])
 
   if (!active && mode === "work") {
     return (
@@ -587,15 +733,15 @@ export default function RouteBinderPage() {
     )
   }
 
+  const previewAspect = getPreviewAspect(active?.id, sheetRot)
+
   return (
     <div className="min-h-[100dvh] bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
-      <div className="sticky top-0 z-20 border-b border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="sticky top-0 z-20 border-b border-zinc-200 bg-white px-2 pb-2 pt-[calc(0.5rem+env(safe-area-inset-top))] dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0 flex-wrap">
-              <div className="text-base font-semibold truncate">
-                {mode === "inbox" ? "Inbox" : site.slangName || "Unnamed stop"}
-              </div>
+              <div className="text-base font-semibold truncate">{mode === "inbox" ? "Inbox" : site.slangName || "Unnamed stop"}</div>
 
               {mode === "work" ? <Badge className={pill.className}>{pill.label}</Badge> : null}
 
@@ -605,8 +751,17 @@ export default function RouteBinderPage() {
                 </Badge>
               ) : null}
 
-              {mode === "work" && active?.meta?.injected ? <Badge variant="secondary" className="px-2 py-1">Injected</Badge> : null}
-              {mode === "work" && active?.meta?.assist ? <Badge variant="secondary" className="px-2 py-1">Assist</Badge> : null}
+              {mode === "work" && active?.meta?.injected ? (
+                <Badge variant="secondary" className="px-2 py-1">
+                  Injected
+                </Badge>
+              ) : null}
+
+              {mode === "work" && active?.meta?.assist ? (
+                <Badge variant="secondary" className="px-2 py-1">
+                  Assist
+                </Badge>
+              ) : null}
 
               {mode === "work" ? (
                 <>
@@ -620,9 +775,7 @@ export default function RouteBinderPage() {
               ) : null}
 
               {pendingInboxCount > 0 ? (
-                <Badge className="bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">
-                  Inbox {pendingInboxCount}
-                </Badge>
+                <Badge className="bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">Inbox {pendingInboxCount}</Badge>
               ) : null}
             </div>
 
@@ -632,7 +785,7 @@ export default function RouteBinderPage() {
               </div>
             ) : (
               <div className="mt-0.5 text-xs text-zinc-500 break-words">
-                Accept to inject after your current stop, reject to discard
+                Accept adds a new stop to the end of your route, reject discards it
               </div>
             )}
           </div>
@@ -649,21 +802,16 @@ export default function RouteBinderPage() {
 
             {mode === "work" ? (
               <>
-                <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
-                <div className="flex flex-wrap items-center gap-2">
+                <Separator className="mx-1 hidden h-6 w-px bg-zinc-200 dark:bg-zinc-800 md:block" />
+
+                <div className="grid w-full grid-cols-3 gap-2 md:flex md:w-auto md:flex-wrap md:items-center">
                   <Button onClick={() => markArrived(active.id)} disabled={viewOnly || arrived || completed}>
                     Arrived
                   </Button>
                   <Button variant="secondary" onClick={() => markComplete(active.id)} disabled={viewOnly || !canFinish}>
                     Complete
                   </Button>
-
-                  <Button
-                    variant="outline"
-                    onClick={goNextLocked}
-                    disabled={!completed}
-                    title={!completed ? "Complete this stop first" : "Next"}
-                  >
+                  <Button variant="outline" onClick={goNextLocked} disabled={!completed} title={!completed ? "Complete this stop first" : "Next"}>
                     {completed && !hasNext ? "Finish" : "Next"}
                   </Button>
                 </div>
@@ -695,12 +843,12 @@ export default function RouteBinderPage() {
         </div>
       ) : null}
 
-      <div className="p-2 pb-20">
+      <div className="p-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">
         {mode === "inbox" ? (
           <div className="grid grid-cols-12 gap-2">
             <div className="col-span-12 xl:col-span-4 grid gap-2">
               <Panel title="Inbox status" right={<div className="text-[11px] text-zinc-500">{pendingInboxCount} pending</div>}>
-                <div className="text-sm text-zinc-500">Accept injects a new stop right after your current stop. It does not jump you forward.</div>
+                <div className="text-sm text-zinc-500">Accept adds a stop to the end of the route. It does not move your current stop.</div>
               </Panel>
             </div>
 
@@ -714,7 +862,7 @@ export default function RouteBinderPage() {
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">{item.title || "Inbox"}</div>
-                              <Badge className="bg-zinc-800 text-white">New</Badge>
+                              <Badge className="bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">New</Badge>
                             </div>
 
                             <div className="mt-0.5 text-xs text-zinc-500 truncate">
@@ -746,7 +894,7 @@ export default function RouteBinderPage() {
           </div>
         ) : (
           <>
-            {isDoneBanner ? (
+            {routeDoneAtTs ? (
               <Panel
                 title="Work completed"
                 right={
@@ -974,25 +1122,21 @@ export default function RouteBinderPage() {
                   <Panel
                     title="Route sheet"
                     right={
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <Button variant="outline" onClick={() => rotateSheet(-90)} disabled={!sheetSrc}>
-                          Rotate left
+                          Rotate
                         </Button>
-                        <Button variant="outline" onClick={() => rotateSheet(90)} disabled={!sheetSrc}>
-                          Rotate right
-                        </Button>
-                        <Button variant="outline" onClick={resetSheet} disabled={!sheetSrc}>
-                          Reset
-                        </Button>
-
-                        <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
-
                         <Button variant="outline" onClick={() => setSheetOpen(true)} disabled={!sheetSrc}>
                           Expand
                         </Button>
                         <Button variant="outline" onClick={geocodeActiveStop}>
                           Fix geo
                         </Button>
+                        <div className="hidden md:block">
+                          <Button variant="outline" onClick={resetSheet} disabled={!sheetSrc}>
+                            Reset
+                          </Button>
+                        </div>
                       </div>
                     }
                     className="xl:block"
@@ -1015,37 +1159,39 @@ export default function RouteBinderPage() {
                         <div
                           className="relative w-full overflow-hidden"
                           style={{
-                            aspectRatio: viewportAspect,
-                            maxHeight: "70vh",
+                            aspectRatio: previewAspect,
+                            maxHeight: "62vh",
                           }}
                         >
-                          <div
-                            className="absolute inset-0"
+                          <img
+                            key={active?.id || "sheet"}
+                            src={sheetSrc}
+                            alt={`${site.slangName || "Stop"} route sheet`}
+                            className="absolute inset-0 h-full w-full select-none"
+                            draggable={false}
                             style={{
+                              objectFit: "contain",
                               transform: `rotate(${sheetRot}deg)`,
                               transformOrigin: "center center",
+                              imageOrientation: "none",
                             }}
-                          >
-                            <Image
-                              key={active?.id || "sheet"}
-                              src={sheetSrc}
-                              alt={`${site.slangName || "Stop"} route sheet`}
-                              fill
-                              sizes="100vw"
-                              className="object-contain"
-                              priority
-                              onLoadingComplete={(img) => {
-                                if (active?.id && img?.naturalWidth && img?.naturalHeight) {
-                                  setSheetDims(prev => ({
-                                    ...prev,
-                                    [active.id]: { w: img.naturalWidth, h: img.naturalHeight },
-                                  }))
-                                }
-                                setSheetLoading(false)
-                              }}
-                              onError={() => setSheetLoading(false)}
-                            />
-                          </div>
+                            onLoad={(e) => {
+                              const img = e.currentTarget
+                              if (active?.id && img?.naturalWidth && img?.naturalHeight) {
+                                setSheetDims(prev => ({
+                                  ...prev,
+                                  [active.id]: { w: img.naturalWidth, h: img.naturalHeight },
+                                }))
+                                maybeAutoOrient(active.id, sheetSrc, img.naturalWidth, img.naturalHeight)
+                              }
+                              setSheetLoading(false)
+                            }}
+                            onError={() => setSheetLoading(false)}
+                          />
+                        </div>
+
+                        <div className="border-t border-zinc-200 px-2 py-1 text-left text-[11px] text-zinc-500 dark:border-zinc-800">
+                          Tap to expand, pinch inside expand view to zoom
                         </div>
                       </button>
                     ) : (
@@ -1060,34 +1206,6 @@ export default function RouteBinderPage() {
           </>
         )}
       </div>
-
-      {sortedStops?.length ? (
-        <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
-          <div className="flex items-center gap-2 overflow-x-auto">
-            {sortedStops.map((s, idx) => {
-              const st = statusOf(s)
-              const isActive = s.id === activeStopId
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => {
-                    clearRouteDone()
-                    setMode("work")
-                    setSheetLoading(true)
-                    setSwitchState({ busy: true, targetId: s.id, startTs: Date.now() })
-                    selectStop(s.id)
-                  }}
-                  className={cx("shrink-0 border px-2 py-1 text-xs font-semibold", stopChipClass(st, isActive), "border-zinc-200 dark:border-zinc-800")}
-                  title={`${idx + 1} , ${s.site?.slangName || s.id}`}
-                >
-                  {idx + 1}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      ) : null}
 
       <SheetOverlay
         open={sheetOpen}
