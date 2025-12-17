@@ -2,8 +2,12 @@ name: Deploy RouteBinder to Hetzner
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
+
+concurrency:
+  group: route-binder-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -13,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Deploy via Appleboy SSH Action
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: 5.161.103.30
           username: root
@@ -24,7 +28,7 @@ jobs:
             echo "Deploying RouteBinder, $(date -u)"
 
             APP_NAME="route-binder"
-            REPO_DIR="/root/RouteBinderBase"
+            REPO_DIR="/root/route-binder"
             APP_DIR="$REPO_DIR"
             BRANCH="main"
             PORT="3011"
@@ -33,7 +37,7 @@ jobs:
             echo "1) Clone or update repo"
             if [ ! -d "$REPO_DIR/.git" ]; then
               rm -rf "$REPO_DIR"
-              git clone git@github.com:AOEngineering/RouteBinder.git "$REPO_DIR"
+              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
             fi
 
             cd "$REPO_DIR"
