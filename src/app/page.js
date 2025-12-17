@@ -1,3 +1,6 @@
+//src/app/route-binder/page.jsx
+
+
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -112,9 +115,7 @@ function TaskRow({ title, detail, done, disabled, onToggle }) {
       className={cx(
         "w-full border px-2 py-2 text-left transition",
         disabled ? "opacity-60" : "",
-        done
-          ? "border-emerald-600 bg-emerald-50 dark:bg-emerald-950"
-          : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+        done ? "border-emerald-600 bg-emerald-50 dark:bg-emerald-950" : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
       )}
     >
       <div className="flex items-center justify-between gap-2">
@@ -138,9 +139,7 @@ function Segmented({ value, onChange, items }) {
           onClick={() => onChange(it.value)}
           className={cx(
             "px-2 py-1 text-xs font-semibold",
-            value === it.value
-              ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-              : "bg-white text-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+            value === it.value ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "bg-white text-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
           )}
         >
           {it.label}
@@ -254,7 +253,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
             <div className="text-xs text-white/70 truncate">{src}</div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 1.15), x, y })}>
               Zoom in
             </Button>
@@ -551,9 +550,9 @@ export default function RouteBinderPage() {
   return (
     <div className="min-h-[100dvh] bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
       <div className="sticky top-0 z-20 border-b border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2 min-w-0 flex-wrap">
               <div className="text-base font-semibold truncate">
                 {mode === "inbox" ? "Inbox" : site.slangName || "Unnamed stop"}
               </div>
@@ -582,17 +581,17 @@ export default function RouteBinderPage() {
             </div>
 
             {mode === "work" ? (
-              <div className="mt-0.5 text-xs text-zinc-500 truncate">
+              <div className="mt-0.5 text-xs text-zinc-500 break-words">
                 Route {site.routeNumber || "?"} , {addrLine || "No address"} {windowBar ? `, ${windowBar}` : ""}
               </div>
             ) : (
-              <div className="mt-0.5 text-xs text-zinc-500 truncate">
+              <div className="mt-0.5 text-xs text-zinc-500 break-words">
                 Accept to inject after your current stop, reject to discard
               </div>
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="flex items-center border border-zinc-200 dark:border-zinc-800">
               <Button
                 variant={mode === "work" ? "secondary" : "outline"}
@@ -613,7 +612,7 @@ export default function RouteBinderPage() {
             {mode === "work" ? (
               <>
                 <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button onClick={() => markArrived(active.id)} disabled={arrived || completed}>
                     Arrived
                   </Button>
@@ -649,7 +648,7 @@ export default function RouteBinderPage() {
       <div className="p-2 pb-20">
         {mode === "inbox" ? (
           <div className="grid grid-cols-12 gap-2">
-            <div className="col-span-12 lg:col-span-4 grid gap-2">
+            <div className="col-span-12 xl:col-span-4 grid gap-2">
               <Panel title="Inbox status" right={<div className="text-[11px] text-zinc-500">{pendingInboxCount} pending</div>}>
                 <div className="text-sm text-zinc-500">
                   Accept injects a new stop right after your current stop. It does not jump you forward.
@@ -657,7 +656,7 @@ export default function RouteBinderPage() {
               </Panel>
             </div>
 
-            <div className="col-span-12 lg:col-span-8 grid gap-2">
+            <div className="col-span-12 xl:col-span-8 grid gap-2">
               <Panel title="Items">
                 <div className="grid gap-2">
                   {inboxItems?.length ? (
@@ -698,7 +697,7 @@ export default function RouteBinderPage() {
             ) : null}
 
             <div className="grid grid-cols-12 gap-2">
-              <div className="col-span-12 lg:col-span-4 grid gap-2">
+              <div className="col-span-12 xl:col-span-4 grid gap-2">
                 <Panel
                   title="Actions"
                   right={
@@ -794,8 +793,8 @@ export default function RouteBinderPage() {
                 </Panel>
               </div>
 
-              <div className="col-span-12 lg:col-span-8 grid gap-2">
-                <div className="lg:hidden">
+              <div className="col-span-12 xl:col-span-8 grid gap-2">
+                <div className="xl:hidden">
                   <Segmented
                     value={mobileMode}
                     onChange={setMobileMode}
@@ -807,7 +806,7 @@ export default function RouteBinderPage() {
                   />
                 </div>
 
-                <div className="hidden lg:grid grid-cols-2 gap-2">
+                <div className="hidden xl:grid grid-cols-2 gap-2">
                   <Panel
                     title="Map"
                     right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}
@@ -865,7 +864,7 @@ export default function RouteBinderPage() {
                   </Panel>
                 </div>
 
-                <div className="lg:hidden">
+                <div className="xl:hidden">
                   {mobileMode === "map" ? (
                     <Panel title="Map" right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}>
                       <div className="border border-zinc-200 dark:border-zinc-800">
@@ -935,7 +934,7 @@ export default function RouteBinderPage() {
                         </Button>
                       </div>
                     }
-                    className={cx("lg:block", mobileMode !== "sheet" ? "lg:block" : "")}
+                    className="xl:block"
                   >
                     {sheetSrc ? (
                       <button type="button" onClick={() => setSheetOpen(true)} className="w-full border border-zinc-200 dark:border-zinc-800">

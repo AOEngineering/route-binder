@@ -1,4 +1,3 @@
-// src/components/route-binder/route-binder-context.jsx
 "use client"
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react"
@@ -28,6 +27,8 @@ function normalizeStop(stop, idx = 0) {
   const s = stop || {}
   const geo = s.site?.geo || {}
 
+  const routeNumberRaw = s.site?.routeNumber ?? s.routeNumber ?? ""
+
   return {
     id: String(s.id || `stop_${idx + 1}`),
     order: Number.isFinite(s.order) ? s.order : (idx + 1) * 10,
@@ -43,12 +44,12 @@ function normalizeStop(stop, idx = 0) {
     },
 
     site: {
-      routeNumber: String(s.site?.routeNumber || ""),
-      slangName: s.site?.slangName || "",
-      address: s.site?.address || "",
-      city: s.site?.city || "",
-      state: s.site?.state || "OH",
-      zip: s.site?.zip || "",
+      routeNumber: String(routeNumberRaw || ""),
+      slangName: s.site?.slangName || s.slangName || "",
+      address: s.site?.address || s.address || "",
+      city: s.site?.city || s.city || "",
+      state: s.site?.state || s.state || "OH",
+      zip: s.site?.zip || s.zip || "",
       geo: {
         lat: Number.isFinite(geo.lat) ? geo.lat : null,
         lon: Number.isFinite(geo.lon) ? geo.lon : null,
@@ -58,10 +59,10 @@ function normalizeStop(stop, idx = 0) {
     },
 
     schedule: {
-      serviceDays: s.schedule?.serviceDays || "",
-      firstCompletionTime: s.schedule?.firstCompletionTime || "",
-      timeOpen: s.schedule?.timeOpen || "",
-      timeClosed: s.schedule?.timeClosed || "",
+      serviceDays: s.schedule?.serviceDays || s.serviceDays || "",
+      firstCompletionTime: s.schedule?.firstCompletionTime || s.firstCompletionTime || "",
+      timeOpen: s.schedule?.timeOpen || s.timeOpen || "",
+      timeClosed: s.schedule?.timeClosed || s.timeClosed || "",
     },
 
     work: {
@@ -164,6 +165,12 @@ function saveStoredState(truckId, next) {
   } catch {}
 }
 
+function allowedRoutesForTruck(truckObj) {
+  const id = String(truckObj?.id || "")
+  const routes = Array.isArray(truckObj?.routeNumbers) && truckObj.routeNumbers.length ? truckObj.routeNumbers : [id]
+  return new Set(routes.map(v => String(v)))
+}
+
 const RouteBinderContext = createContext(null)
 
 export function RouteBinderProvider({ children }) {
@@ -198,25 +205,17 @@ export function RouteBinderProvider({ children }) {
     setRouteDoneAtTs(null)
   }
 
-  function applyFallbackSeeds() {
-    setTruck("948")
-    setRouteName("Route 948")
-    setRouteLabel("West Side Commercial")
-
-    setMode("work")
-    setQueueFilter("all")
-
-    setStops(seedStops.map((s, i) => normalizeStop(s, i)))
-    setInboxItems((seedInboxItems || []).map((it, i) => normalizeInboxItem(it, i)))
-
-    setActiveStopId(null)
-    setRouteDoneAtTs(null)
-  }
-
   async function bootstrapWithKey(k, opts = {}) {
     const silent = Boolean(opts.silent)
 
     setBoot({ busy: true, error: "", needsKey: false })
+
+    // prevent flash of old truck while fetching
+    setStops([])
+    setInboxItems([])
+    setActiveStopId(null)
+    setRouteDoneAtTs(null)
+
     try {
       const r = await fetch("/api/hub/bootstrap", {
         headers: { xtruckkey: k },
@@ -230,33 +229,62 @@ export function RouteBinderProvider({ children }) {
 
       const j = await r.json()
 
-      const nextTruckId = String(j?.truck?.id || "")
+      const nextTruck = j?.truck || {}
+      const nextTruckId = String(nextTruck?.id || "")
       if (!nextTruckId) throw new Error("Missing truck id")
 
       setTruck(nextTruckId)
-      setRouteName(j?.truck?.routeName || `Route ${nextTruckId}`)
-      setRouteLabel(j?.truck?.routeLabel || "")
+      setRouteName(nextTruck?.routeName || `Route ${nextTruckId}`)
+      setRouteLabel(nextTruck?.routeLabel || "")
 
-      const hubStops = Array.isArray(j?.stops) ? j.stops : []
-      const hubInbox = Array.isArray(j?.inboxItems) ? j.inboxItems : []
+      const allowed = allowedRoutesForTruck(nextTruck)
+
+      const hubStopsRaw = Array.isArray(j?.stops) ? j.stops : []
+      const hubInboxRaw = Array.isArray(j?.inboxItems) ? j.inboxItems : []
+
+      const hubStopsNorm = hubStopsRaw
+        .map((s, i) => normalizeStop(s, i))
+        .filter(s => allowed.has(String(s.site.routeNumber || "")))
+
+      const hubInboxNorm = hubInboxRaw.map((it, i) => normalizeInboxItem(it, i))
 
       const stored = loadStoredState(nextTruckId)
 
-      if (stored && Array.isArray(stored.stops) && stored.stops.length) {
-        setMode(typeof stored.mode === "string" ? stored.mode : "work")
-        setQueueFilter(typeof stored.queueFilter === "string" ? stored.queueFilter : "all")
+      const storedOk =
+        stored &&
+        stored.truckId === nextTruckId &&
+        stored.boundKey === k &&
+        Array.isArray(stored.stops) &&
+        stored.stops.length
 
-        setStops(stored.stops.map((s, i) => normalizeStop(s, i)))
-        setInboxItems((stored.inboxItems || []).map((it, i) => normalizeInboxItem(it, i)))
+      if (storedOk) {
+        const storedStops = stored.stops
+          .map((s, i) => normalizeStop(s, i))
+          .filter(s => allowed.has(String(s.site.routeNumber || "")))
 
-        setActiveStopId(typeof stored.activeStopId === "string" ? stored.activeStopId : null)
-        setRouteDoneAtTs(Number.isFinite(stored.routeDoneAtTs) ? stored.routeDoneAtTs : null)
+        if (storedStops.length) {
+          setMode(typeof stored.mode === "string" ? stored.mode : "work")
+          setQueueFilter(typeof stored.queueFilter === "string" ? stored.queueFilter : "all")
+
+          setStops(storedStops)
+          setInboxItems((stored.inboxItems || []).map((it, i) => normalizeInboxItem(it, i)))
+
+          setActiveStopId(typeof stored.activeStopId === "string" ? stored.activeStopId : null)
+          setRouteDoneAtTs(Number.isFinite(stored.routeDoneAtTs) ? stored.routeDoneAtTs : null)
+        } else {
+          setMode("work")
+          setQueueFilter("all")
+          setStops(hubStopsNorm)
+          setInboxItems(hubInboxNorm)
+          setActiveStopId(null)
+          setRouteDoneAtTs(null)
+        }
       } else {
         setMode("work")
         setQueueFilter("all")
 
-        setStops(hubStops.map((s, i) => normalizeStop(s, i)))
-        setInboxItems(hubInbox.map((it, i) => normalizeInboxItem(it, i)))
+        setStops(hubStopsNorm)
+        setInboxItems(hubInboxNorm)
 
         setActiveStopId(null)
         setRouteDoneAtTs(null)
@@ -372,6 +400,10 @@ export function RouteBinderProvider({ children }) {
     saveStoredState(truck, {
       version: 1,
       savedAtTs: Date.now(),
+
+      truckId: truck,
+      boundKey: truckKey,
+
       mode,
       queueFilter,
       activeStopId,
@@ -379,7 +411,7 @@ export function RouteBinderProvider({ children }) {
       stops,
       inboxItems,
     })
-  }, [hydrated, truck, mode, queueFilter, activeStopId, routeDoneAtTs, stops, inboxItems])
+  }, [hydrated, truck, truckKey, mode, queueFilter, activeStopId, routeDoneAtTs, stops, inboxItems])
 
   function clearRouteDone() {
     setRouteDoneAtTs(null)
@@ -526,7 +558,7 @@ export function RouteBinderProvider({ children }) {
         order: 9999,
         meta: { injected: true, assist: Boolean(p.assist) },
         site: {
-          routeNumber: "",
+          routeNumber: String(truck || ""),
           slangName: p.name || item.title || "Injected stop",
           address: p.address || "",
           city: p.city || "",

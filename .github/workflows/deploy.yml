@@ -1,3 +1,5 @@
+### File 1, `.github/workflows/deploy-route-binder.yml`
+
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -32,95 +34,84 @@ jobs:
             APP_NAME="route-binder"
             REPO_DIR="/root/route-binder"
             APP_DIR="$REPO_DIR"
+            PM2_NAME="route-binder"
+
             PORT="3012"
             HOST="127.0.0.1"
-            BRANCH="${GITHUB_REF_NAME:-master}"
 
-            echo ""
-            echo "0) Basic sanity"
-            node -v || true
-            npm -v || true
-            free -h || true
+            BRANCH="${GITHUB_REF_NAME:-main}"
 
-            echo ""
-            echo "0.1) Ensure pm2 exists"
-            if ! command -v pm2 >/dev/null 2>&1; then
-              npm install -g pm2
-            fi
-
-            echo ""
-            echo "0.2) Ensure curl exists (real health checks)"
-            if ! command -v curl >/dev/null 2>&1; then
-              apt-get update
-              apt-get install -y curl
-            fi
-
-            echo ""
-            echo "1) Clone or update repo"
             if [ ! -d "$REPO_DIR/.git" ]; then
+              echo "Cloning repo into $REPO_DIR"
               rm -rf "$REPO_DIR"
-              git clone https://github.com/AOEngineering/route-binder.git "$REPO_DIR"
+              git clone git@github.com:AOEngineering/RouteBinder.git "$REPO_DIR"
             fi
 
-            cd "$REPO_DIR"
-            git fetch origin "$BRANCH"
+            cd "$APP_DIR"
+
+            echo "Updating repo, branch $BRANCH"
+            git fetch --all --prune
+            git checkout "$BRANCH"
             git reset --hard "origin/$BRANCH"
             git clean -fd
 
-            echo ""
-            echo "2) Install and build"
-            cd "$APP_DIR"
-            rm -rf .next
-            export NODE_OPTIONS="--max-old-space-size=1024"
-
-            if [ -f package-lock.json ]; then
-              npm ci --no-audit --no-fund
+            echo "Install deps"
+            if command -v npm >/dev/null 2>&1; then
+              npm ci
             else
-              npm install --no-audit --no-fund
+              echo "npm not found"
+              exit 1
             fi
 
+            echo "Build"
             npm run build
-            npm prune --omit=dev || true
 
-            echo ""
-            echo "3) Stop PM2 process and free the port"
-            pm2 delete "$APP_NAME" >/dev/null 2>&1 || true
+            echo "Start or restart with PM2 on ${HOST}:${PORT}"
+            export PORT="$PORT"
+            export HOSTNAME="$HOST"
 
-            if ss -lntp | grep -q ":$PORT"; then
-              echo "Port $PORT is busy, freeing it"
-              if command -v fuser >/dev/null 2>&1; then
-                fuser -k "${PORT}/tcp" || true
-              fi
-              pkill -f "next start.*${PORT}" || true
-              pkill -f "node_modules/next/dist/bin/next start.*${PORT}" || true
+            if pm2 list | grep -q "$PM2_NAME"; then
+              pm2 delete "$PM2_NAME" || true
             fi
 
-            echo ""
-            echo "4) Start with PM2 pinned to $HOST:$PORT"
-            export NODE_ENV="production"
-            cd "$APP_DIR"
+            pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" -- start -p "$PORT" -H "$HOST"
+            pm2 save
 
-            # Use npm start so it matches your package.json, while forcing host and port
-            pm2 start npm --name "$APP_NAME" --time -- start -- -p "$PORT" -H "$HOST"
-            pm2 save || true
+            echo "Health check without curl"
+            export HEALTH_URL="http://${HOST}:${PORT}"
 
-            echo ""
-            echo "5) Health checks"
-            pm2 status || true
-            pm2 logs "$APP_NAME" --lines 60 --nostream || true
+            node <<'NODE'
+            const http = require("http")
 
-            ss -lntp | grep ":$PORT" || echo "Nothing listening on $PORT"
+            const url = process.env.HEALTH_URL || "http://127.0.0.1:3012"
+            let attempt = 0
 
-            # Retry a few times because Next can take a moment to become Ready
-            for i in 1 2 3 4 5; do
-              code="$(curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT" || true)"
-              echo "Health attempt $i, HTTP $code"
-              if [ "$code" = "200" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
-                exit 0
-              fi
-              sleep 2
-            done
+            function ping() {
+              attempt += 1
+              const req = http.get(url, res => {
+                const code = res.statusCode || 0
+                res.resume()
 
-            echo "App not responding on http://$HOST:$PORT"
-            exit 1
+                if (code >= 200 && code < 500) {
+                  console.log("Health OK", code)
+                  process.exit(0)
+                }
 
+                retry()
+              })
+
+              req.on("error", retry)
+            }
+
+            function retry() {
+              if (attempt >= 12) {
+                console.error("App not responding on", url)
+                process.exit(1)
+              }
+              setTimeout(ping, 1000)
+            }
+
+            ping()
+            NODE
+
+            echo "Deploy complete"

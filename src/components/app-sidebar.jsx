@@ -1,3 +1,6 @@
+//`src/components/route-binder/app-sidebar.jsx`
+
+
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
@@ -25,13 +28,33 @@ function cx(...parts) {
   return parts.filter(Boolean).join(" ")
 }
 
+function stopName(stop) {
+  return stop?.site?.slangName || stop?.slangName || stop?.id || "Stop"
+}
+
+function stopAddrLine(stop) {
+  const s = stop?.site || stop || {}
+  return [s.address, s.city, s.state, s.zip].filter(Boolean).join(", ")
+}
+
+function stopWindowLine(stop) {
+  const sch = stop?.schedule || {}
+  const parts = []
+  if (sch.timeOpen) parts.push(`Open ${sch.timeOpen}`)
+  if (sch.timeClosed) parts.push(`Close ${sch.timeClosed}`)
+  return parts.join(" , ")
+}
+
 function statusOf(stop) {
-  if (stop.completeAtTs) return "complete"
-  if (stop.arrivedAtTs) return "arrived"
+  if (stop?.progress?.completeAtTs) return "complete"
+  if (stop?.progress?.arrivedAtTs) return "arrived"
   return "pending"
 }
 
 function codeLabel(code) {
+  const c = Number(code)
+  if (!Number.isFinite(c)) return "Weather"
+
   const map = {
     0: "Clear",
     1: "Mostly clear",
@@ -56,7 +79,8 @@ function codeLabel(code) {
     86: "Snow showers",
     95: "Thunderstorm",
   }
-  return map[code] || "Weather"
+
+  return map[c] || "Weather"
 }
 
 function lakeEffectHeuristic({ tempC, snowfallMm, precipMm, windDirDeg }) {
@@ -104,31 +128,37 @@ function StopHoverCard({ stop, isActive, onSelect }) {
   const [loadingGeo, setLoadingGeo] = useState(false)
   const [loadingWx, setLoadingWx] = useState(false)
 
-  const query = useMemo(() => `${stop.address}, ${stop.city}`, [stop.address, stop.city])
+  const name = stopName(stop)
+  const addrLine = stopAddrLine(stop)
+  const windowLine = stopWindowLine(stop)
+
+  const query = useMemo(() => addrLine, [addrLine])
 
   useEffect(() => {
     let alive = true
 
     async function run() {
       if (!open) return
+      if (!query) return
 
       if (geoCache.has(stop.id)) {
         const g = geoCache.get(stop.id)
         setGeo(g)
-      } else {
-        setLoadingGeo(true)
-        try {
-          const r = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`)
-          const j = await r.json()
-          if (!alive) return
-          if (j.ok) {
-            const g = { lat: j.lat, lon: j.lon, label: j.label }
-            geoCache.set(stop.id, g)
-            setGeo(g)
-          }
-        } finally {
-          if (alive) setLoadingGeo(false)
+        return
+      }
+
+      setLoadingGeo(true)
+      try {
+        const r = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`)
+        const j = await r.json()
+        if (!alive) return
+        if (j?.ok) {
+          const g = { lat: j.lat, lon: j.lon, label: j.label }
+          geoCache.set(stop.id, g)
+          setGeo(g)
         }
+      } finally {
+        if (alive) setLoadingGeo(false)
       }
     }
 
@@ -145,7 +175,7 @@ function StopHoverCard({ stop, isActive, onSelect }) {
       if (!open) return
       if (!geo?.lat || !geo?.lon) return
 
-      const key = `${stop.id}:${geo.lat.toFixed(5)},${geo.lon.toFixed(5)}`
+      const key = `${stop.id}:${Number(geo.lat).toFixed(5)},${Number(geo.lon).toFixed(5)}`
       if (wxCache.has(key)) {
         setWeather(wxCache.get(key))
         return
@@ -156,7 +186,7 @@ function StopHoverCard({ stop, isActive, onSelect }) {
         const r = await fetch(`/api/weather?lat=${geo.lat}&lon=${geo.lon}`)
         const j = await r.json()
         if (!alive) return
-        if (j.ok) {
+        if (j?.ok) {
           wxCache.set(key, j.data)
           setWeather(j.data)
         }
@@ -191,20 +221,19 @@ function StopHoverCard({ stop, isActive, onSelect }) {
     ? `https://staticmap.openstreetmap.de/staticmap.php?center=${geo.lat},${geo.lon}&zoom=15&size=420x220&markers=${geo.lat},${geo.lon},red-pushpin`
     : ""
 
+  const orderLabel = String(Math.round(Number(stop.order || 0) / 10) || 0).padStart(2, "0")
+
   return (
     <HoverCard openDelay={200} closeDelay={120} onOpenChange={setOpen}>
       <HoverCardTrigger asChild>
         <div>
           <SidebarMenuButton
-            tooltip={`${String(stop.order).padStart(2, "0")} ${stop.name}`}
+            tooltip={`${orderLabel} ${name}`}
             onClick={onSelect}
-            className={cx(
-              "rounded-none",
-              isActive ? "bg-slate-900 text-white" : ""
-            )}
+            className={cx("rounded-none", isActive ? "bg-slate-900 text-white" : "")}
           >
-            <span className="text-xs tabular-nums">{String(stop.order).padStart(2, "0")}</span>
-            <span className="ml-2 truncate group-data-[collapsible=icon]:hidden">{stop.name}</span>
+            <span className="text-xs tabular-nums">{orderLabel}</span>
+            <span className="ml-2 truncate group-data-[collapsible=icon]:hidden">{name}</span>
           </SidebarMenuButton>
         </div>
       </HoverCardTrigger>
@@ -214,12 +243,10 @@ function StopHoverCard({ stop, isActive, onSelect }) {
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="text-sm font-semibold">
-                {String(stop.order).padStart(2, "0")} {stop.name}
+                {orderLabel} {name}
               </div>
-              <div className="text-xs text-slate-600 mt-1">
-                {stop.address}, {stop.city}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">{stop.window}</div>
+              <div className="text-xs text-slate-600 mt-1 break-words">{addrLine || "No address"}</div>
+              <div className="text-xs text-slate-600 mt-1">{windowLine || ""}</div>
             </div>
 
             <div className="flex flex-col items-end gap-2">
@@ -253,18 +280,17 @@ function StopHoverCard({ stop, isActive, onSelect }) {
           </div>
 
           <div className="mt-3 border border-slate-300 bg-slate-50 p-3">
-            {loadingWx && (
-              <div className="text-sm text-slate-700">Loading weather</div>
-            )}
+            {loadingWx && <div className="text-sm text-slate-700">Loading weather</div>}
 
             {!loadingWx && current && (
               <div className="space-y-1">
                 <div className="text-sm font-semibold">{codeLabel(current.weather_code)}</div>
                 <div className="text-sm text-slate-700">
-                  Temp {Math.round(current.temperature_2m)} C
+                  Temp {Number.isFinite(current.temperature_2m) ? Math.round(current.temperature_2m) : "?"} C
                 </div>
                 <div className="text-sm text-slate-700">
-                  Wind {Math.round(current.wind_speed_10m)} kmh, dir {Math.round(current.wind_direction_10m)} deg
+                  Wind {Number.isFinite(current.wind_speed_10m) ? Math.round(current.wind_speed_10m) : "?"} kmh, dir{" "}
+                  {Number.isFinite(current.wind_direction_10m) ? Math.round(current.wind_direction_10m) : "?"} deg
                 </div>
                 <div className="text-xs text-slate-600">{lake.note}</div>
               </div>
@@ -296,38 +322,60 @@ export function AppSidebar() {
     activeStopId,
     selectStop,
     setMode,
+    resetTruckKey,
   } = useRouteBinder()
 
   const inboxCount = inboxItems.length
+
+  function confirmSwitchTruck() {
+    const ok = window.confirm(
+      "Switch truck now? This will clear the saved key on this device and load a different route."
+    )
+    if (!ok) return
+    resetTruckKey()
+  }
 
   return (
     <Sidebar variant="inset" collapsible="icon">
       <SidebarHeader>
         <div className="p-2">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="text-sm font-semibold group-data-[collapsible=icon]:hidden">
                 Route Binder
               </div>
+
               <div className="text-xs text-slate-600 group-data-[collapsible=icon]:hidden">
-                Truck {truck}, {routeName}
+                Truck {truck || "?"}, {routeName || ""}
               </div>
-              <div className="mt-2 text-xs text-slate-600 group-data-[collapsible=icon]:hidden">
-                {routeLabel}
+
+              {routeLabel ? (
+                <div className="mt-2 text-xs text-slate-600 group-data-[collapsible=icon]:hidden">
+                  {routeLabel}
+                </div>
+              ) : null}
+
+              <div className="mt-2 flex flex-wrap items-center gap-2 group-data-[collapsible=icon]:hidden">
+                <Badge variant="secondary" className="rounded-none">
+                  Active {truck || "?"}
+                </Badge>
+                <Button variant="outline" className="rounded-none" onClick={confirmSwitchTruck}>
+                  Switch truck
+                </Button>
               </div>
             </div>
 
-            {inboxCount > 0 && (
-              <Badge className="rounded-none bg-blue-600 text-white group-data-[collapsible=icon]:hidden">
-                Inbox {inboxCount}
-              </Badge>
-            )}
+            {inboxCount > 0 ? (
+              <>
+                <Badge className="rounded-none bg-blue-600 text-white group-data-[collapsible=icon]:hidden">
+                  Inbox {inboxCount}
+                </Badge>
 
-            {inboxCount > 0 && (
-              <div className="hidden group-data-[collapsible=icon]:block">
-                <Badge className="rounded-none bg-blue-600 text-white">{inboxCount}</Badge>
-              </div>
-            )}
+                <div className="hidden group-data-[collapsible=icon]:block">
+                  <Badge className="rounded-none bg-blue-600 text-white">{inboxCount}</Badge>
+                </div>
+              </>
+            ) : null}
           </div>
 
           <div className="mt-2 flex items-center justify-between text-xs group-data-[collapsible=icon]:hidden">
