@@ -12,11 +12,49 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Deploy via Appleboy SSH Action
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps (runner)
+        run: npm ci
+
+      - name: Build (runner)
+        run: npm run build
+
+      - name: Prune to production deps (runner)
+        run: npm prune --omit=dev
+
+      - name: Create release tarball (runner)
+        run: |
+          set -euo pipefail
+          RELEASE="routebinder_${GITHUB_SHA}.tgz"
+          tar -czf "$RELEASE" \
+            .next \
+            public \
+            package.json \
+            package-lock.json \
+            next.config.mjs \
+            node_modules
+          ls -lh "$RELEASE"
+
+      - name: Upload release to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 5.161.103.30
+          username: root
+          key: ${{ secrets.SSH_KEY }}
+          source: routebinder_${{ github.sha }}.tgz
+          target: /root/route-binder/.incoming
+
+      - name: Activate release on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 5.161.103.30
@@ -27,110 +65,60 @@ jobs:
           script: |
             set -euo pipefail
 
-            echo "Deploying RouteBinder, $(date -u)"
-
-            REPO_DIR="/root/route-binder"
-            APP_DIR="$REPO_DIR"
             PM2_NAME="route-binder"
-
             PORT="3012"
             HOST="127.0.0.1"
 
-            REQUESTED_BRANCH="${GITHUB_REF_NAME:-}"
+            DEPLOY_ROOT="/root/route-binder"
+            INCOMING="${DEPLOY_ROOT}/.incoming"
+            RELEASES="${DEPLOY_ROOT}/.releases"
+            CURRENT="${DEPLOY_ROOT}/current"
 
-            need_cmd () { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1"; exit 1; }; }
-            need_cmd git
-            need_cmd npm
-            need_cmd node
-            need_cmd pm2
-            need_cmd ss
+            RELEASE_FILE="routebinder_${GITHUB_SHA}.tgz"
+            SRC_TGZ="${INCOMING}/${RELEASE_FILE}"
 
-            port_pids () {
-              ss -ltnp "( sport = :$PORT )" 2>/dev/null \
-                | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
-                | sort -u
-            }
+            mkdir -p "$INCOMING" "$RELEASES"
 
-            kill_port_listeners () {
-              local pids
-              pids="$(port_pids || true)"
-              if [ -n "${pids:-}" ]; then
-                echo "Port ${PORT} is in use, killing listeners: ${pids}"
-                for pid in $pids; do
-                  kill -TERM "$pid" 2>/dev/null || true
-                done
-                sleep 1
-                pids="$(port_pids || true)"
-                if [ -n "${pids:-}" ]; then
-                  echo "Still in use, force killing: ${pids}"
-                  for pid in $pids; do
-                    kill -KILL "$pid" 2>/dev/null || true
-                  done
-                fi
-              fi
-            }
-
-            wait_port_free () {
-              for i in $(seq 1 30); do
-                if ! ss -ltn "( sport = :$PORT )" 2>/dev/null | grep -q LISTEN; then
-                  echo "Port ${PORT} is free"
-                  return 0
-                fi
-                echo "Waiting for port ${PORT} to free, attempt ${i}"
-                ss -ltnp "( sport = :$PORT )" 2>/dev/null || true
-                sleep 1
-              done
-              echo "Port ${PORT} is still busy"
-              return 1
-            }
-
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              echo "Cloning repo into $REPO_DIR"
-              rm -rf "$REPO_DIR"
-              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
+            if [ ! -f "$SRC_TGZ" ]; then
+              echo "Missing uploaded release: $SRC_TGZ"
+              ls -la "$INCOMING" || true
+              exit 1
             fi
 
-            cd "$APP_DIR"
+            TS="$(date -u +%Y%m%d_%H%M%S)"
+            NEW_RELEASE="${RELEASES}/${TS}_${GITHUB_SHA}"
+            mkdir -p "$NEW_RELEASE"
 
-            echo "Fetching"
-            git fetch --all --prune
-
-            BRANCH="$REQUESTED_BRANCH"
-            if [ -z "$BRANCH" ]; then BRANCH="master"; fi
-
-            if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-              echo "Requested branch '${BRANCH}' not found, falling back"
-              if git show-ref --verify --quiet "refs/remotes/origin/master"; then
-                BRANCH="master"
-              elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
-                BRANCH="main"
-              else
-                echo "No origin/master or origin/main found"
-                git branch -a
-                exit 1
-              fi
-            fi
-
-            echo "Deploy branch: $BRANCH"
-            git checkout -B "$BRANCH" "origin/$BRANCH"
-            git reset --hard "origin/$BRANCH"
-            git clean -fd
-
-            echo "Install deps"
-            npm ci
-
-            echo "Build"
-            npm run build
-
-            echo "Stop PM2 app if it exists"
+            echo "Stopping PM2 app if present"
             pm2 stop "$PM2_NAME" >/dev/null 2>&1 || true
             pm2 delete "$PM2_NAME" >/dev/null 2>&1 || true
 
-            echo "Kill anything still holding port ${PORT}"
-            kill_port_listeners
-            wait_port_free
+            echo "Free port ${PORT}"
+            for i in $(seq 1 10); do
+              if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+                echo "Port in use, killing, attempt ${i}"
+                fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
+                sleep 1
+              else
+                break
+              fi
+            done
+
+            if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+              echo "Port still busy"
+              ss -ltnp 2>/dev/null | grep ":$PORT" || true
+              exit 1
+            fi
+
+            echo "Extract release"
+            tar -xzf "$SRC_TGZ" -C "$NEW_RELEASE"
+            rm -f "$SRC_TGZ"
+
+            echo "Activate symlink"
+            ln -sfn "$NEW_RELEASE" "$CURRENT"
 
             echo "Start with PM2 on ${HOST}:${PORT}"
+            cd "$CURRENT"
             export PORT="$PORT"
             export HOSTNAME="$HOST"
 
@@ -139,6 +127,6 @@ jobs:
 
             echo "Health check"
             export HEALTH_URL="http://${HOST}:${PORT}"
-            node -e "const http=require('http'); const url=process.env.HEALTH_URL; let attempt=0; const max=20; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200 && code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
+            node -e "const http=require('http'); const url=process.env.HEALTH_URL; let a=0; const m=25; function ping(){ a++; const req=http.get(url,res=>{ const c=res.statusCode||0; res.resume(); if(c>=200&&c<500){ console.log('Health OK',c); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(a>=m){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
 
             echo "Deploy complete"
