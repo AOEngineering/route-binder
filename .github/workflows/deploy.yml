@@ -36,7 +36,6 @@ jobs:
             PORT="3012"
             HOST="127.0.0.1"
 
-            # Branch from GitHub Actions trigger (works for both push + manual)
             REQUESTED_BRANCH="${GITHUB_REF_NAME:-}"
 
             if [ ! -d "$REPO_DIR/.git" ]; then
@@ -50,9 +49,7 @@ jobs:
             echo "Fetching"
             git fetch --all --prune
 
-            # Pick a branch that exists locally or on origin
             BRANCH="$REQUESTED_BRANCH"
-
             if [ -z "$BRANCH" ]; then
               BRANCH="master"
             fi
@@ -76,12 +73,8 @@ jobs:
             git clean -fd
 
             echo "Install deps"
-            if command -v npm >/dev/null 2>&1; then
-              npm ci
-            else
-              echo "npm not found"
-              exit 1
-            fi
+            command -v npm >/dev/null 2>&1 || { echo "npm not found"; exit 1; }
+            npm ci
 
             echo "Build"
             npm run build
@@ -100,7 +93,7 @@ jobs:
             echo "Health check without curl"
             export HEALTH_URL="http://${HOST}:${PORT}"
 
-            node <<'NODE'
+            cat > /tmp/route_binder_healthcheck.js <<'NODE'
             const http = require("http")
 
             const url = process.env.HEALTH_URL || "http://127.0.0.1:3012"
@@ -133,5 +126,7 @@ jobs:
 
             ping()
             NODE
+
+            node /tmp/route_binder_healthcheck.js
 
             echo "Deploy complete"
