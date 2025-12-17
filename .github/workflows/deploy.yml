@@ -92,41 +92,6 @@ jobs:
 
             echo "Health check without curl"
             export HEALTH_URL="http://${HOST}:${PORT}"
-
-            cat > /tmp/route_binder_healthcheck.js <<'NODE'
-            const http = require("http")
-
-            const url = process.env.HEALTH_URL || "http://127.0.0.1:3012"
-            let attempt = 0
-
-            function ping() {
-              attempt += 1
-              const req = http.get(url, res => {
-                const code = res.statusCode || 0
-                res.resume()
-
-                if (code >= 200 && code < 500) {
-                  console.log("Health OK", code)
-                  process.exit(0)
-                }
-
-                retry()
-              })
-
-              req.on("error", retry)
-            }
-
-            function retry() {
-              if (attempt >= 12) {
-                console.error("App not responding on", url)
-                process.exit(1)
-              }
-              setTimeout(ping, 1000)
-            }
-
-            ping()
-            NODE
-
-            node /tmp/route_binder_healthcheck.js
+            node -e "const http=require('http'); const url=process.env.HEALTH_URL||'http://127.0.0.1:3012'; let attempt=0; const max=12; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200&&code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
 
             echo "Deploy complete"
