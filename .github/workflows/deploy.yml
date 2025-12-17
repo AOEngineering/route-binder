@@ -1,3 +1,4 @@
+
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -81,34 +82,59 @@ jobs:
 
             echo "PM2, stop existing app"
             pm2 delete "$PM2_NAME" || true
+            pm2 flush "$PM2_NAME" || true
             pm2 save || true
 
             echo "Wait for port ${PORT} to be free"
-            for i in $(seq 1 20); do
-              if fuser -n tcp "$PORT" >/dev/null 2>&1; then
+            set +e
+
+            in_use=0
+            for i in $(seq 1 25); do
+              fuser -n tcp "$PORT" >/dev/null 2>&1
+              rc=$?
+
+              if [ "$rc" -eq 0 ]; then
+                in_use=1
                 echo "Port still in use, attempt $i"
+                fuser -n tcp "$PORT" -v 2>/dev/null || true
                 sleep 1
               else
+                in_use=0
                 echo "Port is free"
                 break
               fi
             done
 
-            if fuser -n tcp "$PORT" >/dev/null 2>&1; then
-              echo "Port still stuck, killing holder"
-              fuser -n tcp -k "$PORT" || true
+            if [ "$in_use" -eq 1 ]; then
+              echo "Port still stuck, attempting kill"
+              fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
               sleep 1
+
+              echo "Recheck listener"
+              fuser -n tcp "$PORT" >/dev/null 2>&1
+              rc=$?
+
+              if [ "$rc" -eq 0 ]; then
+                echo "Port is STILL in use after kill, showing details"
+                ss -ltnp 2>/dev/null | grep ":$PORT" || true
+                fuser -n tcp "$PORT" -v 2>/dev/null || true
+                exit 1
+              fi
             fi
+
+            set -e
 
             echo "Start with PM2 on ${HOST}:${PORT}"
             export PORT="$PORT"
             export HOSTNAME="$HOST"
+
             pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" -- start -p "$PORT" -H "$HOST"
             pm2 flush "$PM2_NAME" || true
-            pm2 save
+            pm2 save || true
 
             echo "Health check without curl"
             export HEALTH_URL="http://${HOST}:${PORT}"
-            node -e "const http=require('http'); const url=process.env.HEALTH_URL||'http://127.0.0.1:3012'; let attempt=0; const max=12; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200&&code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
+            node -e "const http=require('http'); const url=process.env.HEALTH_URL||'http://127.0.0.1:3012'; let attempt=0; const max=15; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200&&code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
 
             echo "Deploy complete"
+
