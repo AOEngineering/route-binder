@@ -1,4 +1,3 @@
-
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -6,150 +5,62 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
-concurrency:
-  group: route-binder-deploy
-  cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via Appleboy SSH Action
+      - name: Deploy RouteBinder via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 5.161.103.30
           username: root
           key: ${{ secrets.SSH_KEY }}
-          script_stop: true
-          command_timeout: 30m
           script: |
-            set -euo pipefail
+            set -e
 
-            echo "Deploying RouteBinder, $(date -u)"
+            echo "→ Deploying RouteBinder, $(date -u)"
 
-            REPO_DIR="/root/route-binder"
-            PM2_NAME="route-binder"
-            PORT="3012"
-            HOST="127.0.0.1"
+            cd /root/route-binder
+            git fetch origin master || true
+            git fetch origin main || true
 
-            need_cmd () { command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1"; exit 1; }; }
-            need_cmd git
-            need_cmd node
-            need_cmd npm
-            need_cmd pm2
-            need_cmd fuser
+            # prefer the branch that triggered the workflow
+            BRANCH="${GITHUB_REF_NAME:-master}"
+            git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH" 2>/dev/null || true
 
-            ensure_swap () {
-              if ! swapon --show | awk '{print $1}' | grep -qx "/swapfile"; then
-                echo "No /swapfile swap active, creating 6G swap"
-                fallocate -l 6G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=6144
-                chmod 600 /swapfile
-                mkswap /swapfile >/dev/null
-                swapon /swapfile
-                grep -q "^/swapfile " /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-              fi
-              echo "Memory status"
-              free -h
-              swapon --show || true
-            }
-
-            free_port () {
-              for i in $(seq 1 10); do
-                if fuser -n tcp "$PORT" >/dev/null 2>&1; then
-                  echo "Port $PORT in use, killing listener, attempt $i"
-                  fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
-                  sleep 1
-                else
-                  echo "Port $PORT is free"
-                  return 0
-                fi
-              done
-              echo "Port $PORT still busy"
-              fuser -n tcp "$PORT" -v 2>/dev/null || true
-              return 1
-            }
-
-            health_check () {
-              node -e "const http=require('http');const url=process.env.URL;let a=0;const m=25;function ping(){a++;const r=http.get(url,res=>{const c=res.statusCode||0;res.resume();if(c>=200&&c<500){console.log('Health OK',c);process.exit(0)}retry()});r.on('error',retry)}function retry(){if(a>=m){console.error('App not responding',url);process.exit(1)}setTimeout(ping,1000)}ping()"
-            }
-
-            ensure_swap
-
-            if [ ! -d "$REPO_DIR/.git" ]; then
-              echo "Cloning repo into $REPO_DIR"
-              rm -rf "$REPO_DIR"
-              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
+            # fall back if needed
+            if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              git reset --hard "origin/$BRANCH"
+            elif git rev-parse --verify "origin/master" >/dev/null 2>&1; then
+              BRANCH="master"
+              git reset --hard "origin/master"
+            else
+              BRANCH="main"
+              git reset --hard "origin/main"
             fi
 
-            cd "$REPO_DIR"
-            git fetch --all --prune
-
-            BRANCH="${GITHUB_REF_NAME:-}"
-            if [ -z "$BRANCH" ]; then BRANCH="master"; fi
-            if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-              echo "Branch '$BRANCH' not found, falling back"
-              if git show-ref --verify --quiet "refs/remotes/origin/master"; then
-                BRANCH="master"
-              elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
-                BRANCH="main"
-              else
-                echo "No origin/master or origin/main found"
-                git branch -a
-                exit 1
-              fi
-            fi
-
-            echo "Deploy branch: $BRANCH"
-            git checkout -B "$BRANCH" "origin/$BRANCH"
-            git reset --hard "origin/$BRANCH"
             git clean -fd
 
+            echo "→ Install deps"
             export NEXT_TELEMETRY_DISABLED=1
             export NODE_OPTIONS="--max-old-space-size=512"
-            export npm_config_audit=false
-            export npm_config_fund=false
-            export npm_config_progress=false
-            export npm_config_jobs=1
 
-            echo "Install deps only if lock changed"
-            NEW_LOCK_HASH=""
             if [ -f package-lock.json ]; then
-              NEW_LOCK_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
-            fi
-            OLD_LOCK_HASH=""
-            if [ -f .deploy_lock_hash ]; then
-              OLD_LOCK_HASH="$(cat .deploy_lock_hash || true)"
-            fi
-
-            if [ -z "$NEW_LOCK_HASH" ]; then
-              echo "No package-lock.json found, using npm install"
-              npm install --no-audit --no-fund
-              echo "no_lockfile" > .deploy_lock_hash
+              npm ci --no-audit --no-fund
             else
-              if [ "$NEW_LOCK_HASH" != "$OLD_LOCK_HASH" ]; then
-                echo "Lock changed, running npm ci"
-                npm ci --no-audit --no-fund
-                echo "$NEW_LOCK_HASH" > .deploy_lock_hash
-              else
-                echo "Lock unchanged, skipping npm ci"
-              fi
+              npm install --no-audit --no-fund
             fi
 
-            echo "Build"
-            rm -rf .next || true
+            echo "→ Build"
+            rm -rf .next
             npm run build
 
-            echo "Restart service"
-            pm2 delete "$PM2_NAME" || true
-            free_port
+            echo "→ Restart PM2"
+            pm2 delete route-binder || true
+            fuser -n tcp -k 3012 || true
+            sleep 1
 
-            export PORT="$PORT"
-            export HOSTNAME="$HOST"
-            pm2 start npm --name "$PM2_NAME" --time -- run start -- -p "$PORT" -H "$HOST"
-            pm2 save || true
+            PORT=3012 HOSTNAME=127.0.0.1 pm2 start npm --name route-binder -- run start -- -p 3012 -H 127.0.0.1
+            pm2 save
 
-            echo "Health check"
-            export URL="http://${HOST}:${PORT}"
-            health_check
-
-            echo "Deploy complete"
+            echo "→ Done"
