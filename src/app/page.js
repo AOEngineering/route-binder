@@ -103,7 +103,6 @@ function StatTile({ label, value, sub }) {
   )
 }
 
-
 function TaskRow({ title, detail, done, disabled, onToggle }) {
   return (
     <button
@@ -158,15 +157,10 @@ function stopChipClass(status, active) {
   return "bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
 }
 
-/**
-  Sheet viewer overlay, remembers transform per stopId
-  Supports pan, wheel zoom, two finger pinch zoom, double tap reset
-*/
 function SheetOverlay({ open, onClose, src, title, state, setState }) {
-  const wrapRef = useRef(null)
   const lastTapRef = useRef(0)
   const pointers = useRef(new Map())
-  const pinchRef = useRef({ active: false, startDist: 0, startScale: 1, startMid: null })
+  const pinchRef = useRef({ active: false, startDist: 0, startScale: 1 })
 
   useEffect(() => {
     if (!open) return
@@ -215,12 +209,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
       const dx = pts[0].x - pts[1].x
       const dy = pts[0].y - pts[1].y
       const dist = Math.sqrt(dx * dx + dy * dy)
-      pinchRef.current = {
-        active: true,
-        startDist: dist,
-        startScale: scale,
-        startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
-      }
+      pinchRef.current = { active: true, startDist: dist, startScale: scale }
     }
   }
 
@@ -280,7 +269,6 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
         </div>
 
         <div
-          ref={wrapRef}
           className="relative flex-1 overflow-hidden"
           onWheel={onWheel}
           onPointerDown={onPointerDown}
@@ -297,18 +285,50 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
               touchAction: "none",
             }}
           >
-            <img
-              src={src}
-              alt={title || "Route sheet"}
-              className="max-h-[88vh] max-w-[92vw] select-none"
-              draggable={false}
-            />
+            <img src={src} alt={title || "Route sheet"} className="max-h-[88vh] max-w-[92vw] select-none" draggable={false} />
           </div>
 
           <div className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
             Drag to pan, pinch or wheel to zoom, double tap to reset
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function InboxCard({ item, onAccept, onReject }) {
+  const p = item.payload || {}
+  const addrLine = [p.address, p.city, p.state, p.zip].filter(Boolean).join(", ")
+
+  return (
+    <div className="border p-2 border-zinc-200 dark:border-zinc-800">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">{item.title || "Inbox"}</div>
+            <Badge className="bg-zinc-800 text-white">New</Badge>
+          </div>
+
+          <div className="mt-0.5 text-xs text-zinc-500 truncate">
+            {item.from ? `From ${item.from}` : ""}{item.receivedAt ? ` , ${item.receivedAt}` : ""}
+          </div>
+
+          {item.hint ? <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">{item.hint}</div> : null}
+
+          {p.name ? <div className="mt-1 text-xs text-zinc-500">Stop {p.name}</div> : null}
+          {addrLine ? <div className="mt-0.5 text-xs text-zinc-500 truncate">{addrLine}</div> : null}
+          {p.window ? <div className="mt-0.5 text-xs text-zinc-500 truncate">{p.window}</div> : null}
+        </div>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button variant="secondary" onClick={onAccept}>
+          Accept, add to route
+        </Button>
+        <Button variant="outline" onClick={onReject}>
+          Reject
+        </Button>
       </div>
     </div>
   )
@@ -330,6 +350,19 @@ export default function RouteBinderPage() {
     canComplete,
     goNextLocked,
     geocodeActiveStop,
+
+    mode,
+    setMode,
+
+    inboxItems,
+    pendingInboxCount,
+    acceptInboxItemToRoute,
+    rejectInboxItem,
+
+    routeDoneAtTs,
+    clearRouteDone,
+
+    nextStop,
   } = useRouteBinder()
 
   const active = useMemo(() => {
@@ -364,9 +397,9 @@ export default function RouteBinderPage() {
   const [geoState, setGeoState] = useState({ busy: false, error: "" })
   const [wxState, setWxState] = useState({ busy: false, error: "" })
   const [wx, setWx] = useState(null)
-  const [tempUnit, setTempUnit] = useState("f") // f or c
+  const [tempUnit, setTempUnit] = useState("f")
 
-  const [mobileMode, setMobileMode] = useState("sheet") // map, sheet, wx
+  const [mobileMode, setMobileMode] = useState("sheet")
   const [sheetOpen, setSheetOpen] = useState(false)
   const [sheetTransforms, setSheetTransforms] = useState({})
 
@@ -473,7 +506,9 @@ export default function RouteBinderPage() {
     const top = lat + d
     const bottom = lat - d
     const bbox = [left, bottom, right, top].join(",")
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(bbox)}&layer=mapnik&marker=${encodeURIComponent(`${lat},${lon}`)}`
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(bbox)}&layer=mapnik&marker=${encodeURIComponent(
+      `${lat},${lon}`
+    )}`
   }, [hasGeo, lat, lon])
 
   const completed = Boolean(active?.progress?.completeAtTs)
@@ -494,14 +529,16 @@ export default function RouteBinderPage() {
   }, [schedule.serviceDays, schedule.firstCompletionTime, schedule.timeOpen, schedule.timeClosed])
 
   const sheetSrc = active?.sheet?.imageSrc || ""
-
   const sheetTransform = sheetTransforms[active?.id] || { scale: 1, x: 0, y: 0 }
 
   function setSheetTransform(next) {
     setSheetTransforms(prev => ({ ...prev, [active.id]: next }))
   }
 
-  if (!active) {
+  const isDoneBanner = Boolean(routeDoneAtTs)
+  const hasNext = Boolean(nextStop)
+
+  if (!active && mode === "work") {
     return (
       <div className="p-3">
         <Panel title="No stops">
@@ -513,352 +550,446 @@ export default function RouteBinderPage() {
 
   return (
     <div className="min-h-[100dvh] bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
-      {/* Dense sticky header, one block */}
       <div className="sticky top-0 z-20 border-b border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2 min-w-0">
-              <div className="text-base font-semibold truncate">{site.slangName || "Unnamed stop"}</div>
-              <Badge className={pill.className}>{pill.label}</Badge>
-              {active?.meta?.injected ? <Badge variant="secondary" className="px-2 py-1">Injected</Badge> : null}
-              {active?.meta?.assist ? <Badge variant="secondary" className="px-2 py-1">Assist</Badge> : null}
-              <Badge variant="secondary" className="px-2 py-1">
-                Stop {activeIndex + 1} of {total}
-              </Badge>
-              <Badge variant="secondary" className="px-2 py-1">
-                Timer {formatDuration(activeElapsed)}
-              </Badge>
+              <div className="text-base font-semibold truncate">
+                {mode === "inbox" ? "Inbox" : site.slangName || "Unnamed stop"}
+              </div>
+
+              {mode === "work" ? <Badge className={pill.className}>{pill.label}</Badge> : null}
+
+              {mode === "work" && active?.meta?.injected ? <Badge variant="secondary" className="px-2 py-1">Injected</Badge> : null}
+              {mode === "work" && active?.meta?.assist ? <Badge variant="secondary" className="px-2 py-1">Assist</Badge> : null}
+
+              {mode === "work" ? (
+                <>
+                  <Badge variant="secondary" className="px-2 py-1">
+                    Stop {activeIndex + 1} of {total}
+                  </Badge>
+                  <Badge variant="secondary" className="px-2 py-1">
+                    Timer {formatDuration(activeElapsed)}
+                  </Badge>
+                </>
+              ) : null}
+
+              {pendingInboxCount > 0 ? (
+                <Badge className="bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">
+                  Inbox {pendingInboxCount}
+                </Badge>
+              ) : null}
             </div>
 
-            <div className="mt-0.5 text-xs text-zinc-500 truncate">
-              Route {site.routeNumber || "?"} , {addrLine || "No address"} {windowBar ? `, ${windowBar}` : ""}
-            </div>
+            {mode === "work" ? (
+              <div className="mt-0.5 text-xs text-zinc-500 truncate">
+                Route {site.routeNumber || "?"} , {addrLine || "No address"} {windowBar ? `, ${windowBar}` : ""}
+              </div>
+            ) : (
+              <div className="mt-0.5 text-xs text-zinc-500 truncate">
+                Accept to inject after your current stop, reject to discard
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
-            <Button onClick={() => markArrived(active.id)} disabled={arrived || completed}>
-              Arrived
-            </Button>
-            <Button variant="secondary" onClick={() => markComplete(active.id)} disabled={!canFinish}>
-              Complete
-            </Button>
-            <Button variant="outline" onClick={goNextLocked} disabled={!completed}>
-              Next
-            </Button>
-          </div>
-        </div>
+            <div className="flex items-center border border-zinc-200 dark:border-zinc-800">
+              <Button
+                variant={mode === "work" ? "secondary" : "outline"}
+                onClick={() => setMode("work")}
+                className="rounded-none border-0"
+              >
+                Work
+              </Button>
+              <Button
+                variant={mode === "inbox" ? "secondary" : "outline"}
+                onClick={() => setMode("inbox")}
+                className="rounded-none border-0"
+              >
+                Inbox
+              </Button>
+            </div>
 
-        <div className="mt-2">
-          <div className="h-2 w-full border border-zinc-200 dark:border-zinc-800">
-            <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${progress}%` }} />
-          </div>
-          <div className="mt-1 text-[11px] text-zinc-500">
-            Route progress {stats.complete} complete , {stats.pending} pending
-          </div>
-        </div>
-      </div>
-
-      <div className="p-2 pb-20">
-        <div className="grid grid-cols-12 gap-2">
-          {/* Left rail */}
-          <div className="col-span-12 lg:col-span-4 grid gap-2">
-            <Panel
-              title="Actions"
-              right={
+            {mode === "work" ? (
+              <>
+                <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" onClick={locateStop} disabled={!addrLine || geoState.busy}>
-                    {geoState.busy ? "Locating" : "Locate"}
+                  <Button onClick={() => markArrived(active.id)} disabled={arrived || completed}>
+                    Arrived
                   </Button>
-                  <Button variant="outline" onClick={() => hasGeo && loadWeather(lat, lon)} disabled={!hasGeo || wxState.busy}>
-                    {wxState.busy ? "Wx" : "Refresh wx"}
+                  <Button variant="secondary" onClick={() => markComplete(active.id)} disabled={!canFinish}>
+                    Complete
                   </Button>
-                </div>
-              }
-            >
-              <div className="grid grid-cols-2 gap-2">
-                <Button variant="outline" onClick={copyAddress} disabled={!addrLine}>
-                  Copy address
-                </Button>
-                <Button variant="secondary" asChild disabled={!mapsHref}>
-                  <a href={mapsHref} target="_blank" rel="noreferrer">Open maps</a>
-                </Button>
-              </div>
-
-              {(geoState.error || wxState.error) ? (
-                <div className="mt-2 border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-                  {geoState.error || wxState.error}
-                </div>
-              ) : null}
-
-              <Separator className="my-2" />
-
-              <div className="grid grid-cols-2 gap-2">
-                <StatTile label="Open" value={schedule.timeOpen || "?"} />
-                <StatTile label="Close" value={schedule.timeClosed || "?"} />
-                <StatTile label="Days" value={schedule.serviceDays || "?"} />
-                <StatTile label="First" value={schedule.firstCompletionTime || "?"} />
-              </div>
-
-              {active.specialNotes ? (
-                <>
-                  <Separator className="my-2" />
-                  <div className="text-xs text-zinc-500">Special</div>
-                  <div className="mt-0.5 text-sm">{active.specialNotes}</div>
-                </>
-              ) : null}
-            </Panel>
-
-            <Panel title="Work list">
-              <div className="grid gap-2">
-                <TaskRow
-                  title="Plow"
-                  detail={work?.plow?.targetInches ? `${work.plow.targetInches} inch target` : "Use the sheet and site feel"}
-                  done={Boolean(checks.plowDone)}
-                  disabled={lockWork}
-                  onToggle={() => patch({ checks: { ...checks, plowDone: !checks.plowDone } })}
-                />
-
-                <TaskRow
-                  title="Salt"
-                  detail={saltDetail || "No salt instructions"}
-                  done={Boolean(checks.saltDone)}
-                  disabled={lockWork}
-                  onToggle={() => patch({ checks: { ...checks, saltDone: !checks.saltDone } })}
-                />
-
-                <TaskRow
-                  title="Sidewalk"
-                  detail={sidewalkDetail || "No sidewalk instructions"}
-                  done={Boolean(checks.sidewalkDone)}
-                  disabled={lockWork}
-                  onToggle={() => patch({ checks: { ...checks, sidewalkDone: !checks.sidewalkDone } })}
-                />
-
-                <TaskRow
-                  title="Satellite check"
-                  detail={satelliteDetail || "None"}
-                  done={Boolean(checks.satelliteChecked)}
-                  disabled={lockWork}
-                  onToggle={() => patch({ checks: { ...checks, satelliteChecked: !checks.satelliteChecked } })}
-                />
-
-                <TaskRow
-                  title="Photo"
-                  detail="Proof photo if needed"
-                  done={Boolean(checks.photoCaptured)}
-                  disabled={lockWork}
-                  onToggle={() => patch({ checks: { ...checks, photoCaptured: !checks.photoCaptured } })}
-                />
-              </div>
-
-              <div className="mt-2 text-[11px] text-zinc-500">
-                Work is locked until Arrived, Complete is locked until required items are done.
-              </div>
-            </Panel>
-          </div>
-
-          {/* Right side, tablet shows two panes, phone uses modes */}
-          <div className="col-span-12 lg:col-span-8 grid gap-2">
-            {/* Phone mode selector */}
-            <div className="lg:hidden">
-              <Segmented
-                value={mobileMode}
-                onChange={setMobileMode}
-                items={[
-                  { value: "sheet", label: "Sheet" },
-                  { value: "map", label: "Map" },
-                  { value: "wx", label: "Conditions" },
-                ]}
-              />
-            </div>
-
-            {/* Tablet, map and wx side by side */}
-            <div className="hidden lg:grid grid-cols-2 gap-2">
-              <Panel
-                title="Map"
-                right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}
-              >
-                <div className="border border-zinc-200 dark:border-zinc-800">
-                  {hasGeo ? (
-                    <iframe title="map" src={mapUrl} className="h-[32vh] w-full" loading="lazy" />
-                  ) : (
-                    <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
-                  )}
-                </div>
-                {hasGeo && geo.label ? (
-                  <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div>
-                ) : null}
-              </Panel>
-
-              <Panel
-                title="Conditions"
-                right={
-                  <div className="flex items-center gap-2">
-                    <Segmented
-                      value={tempUnit}
-                      onChange={setTempUnit}
-                      items={[
-                        { value: "f", label: "F" },
-                        { value: "c", label: "C" },
-                      ]}
-                    />
-                  </div>
-                }
-              >
-                {!hasGeo ? (
-                  <div className="text-sm text-zinc-500">Locate the stop to load conditions.</div>
-                ) : !wxCurrent ? (
-                  <div className="text-sm text-zinc-500">{wxState.busy ? "Loading" : "No data yet"}</div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-2">
-                    <StatTile
-                      label="Temp"
-                      value={() => {
-                        const c = wxCurrent.temperature_2m
-                        const f = cToF(c)
-                        if (tempUnit === "c") return Number.isFinite(Number(c)) ? `${Math.round(c)}°C` : "?"
-                        return Number.isFinite(Number(f)) ? `${Math.round(f)}°F` : "?"
-                      }}
-                      sub={wxLabel(wxCurrent.weather_code)}
-                    />
-                    <StatTile
-                      label="Wind"
-                      value={Number.isFinite(wxCurrent.wind_speed_10m) ? `${Math.round(wxCurrent.wind_speed_10m)} mph` : "?"}
-                      sub={Number.isFinite(wxCurrent.wind_direction_10m) ? `${Math.round(wxCurrent.wind_direction_10m)}°` : ""}
-                    />
-                    <StatTile label="Precip" value={Number.isFinite(wxCurrent.precipitation) ? `${wxCurrent.precipitation} mm` : "?"} />
-                    <StatTile label="Snow" value={Number.isFinite(wxCurrent.snowfall) ? `${wxCurrent.snowfall} cm` : "?"} />
-                  </div>
-                )}
-              </Panel>
-            </div>
-
-            {/* Phone, show selected panel */}
-            <div className="lg:hidden">
-              {mobileMode === "map" ? (
-                <Panel title="Map" right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}>
-                  <div className="border border-zinc-200 dark:border-zinc-800">
-                    {hasGeo ? (
-                      <iframe title="map" src={mapUrl} className="h-[38vh] w-full" loading="lazy" />
-                    ) : (
-                      <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
-                    )}
-                  </div>
-                  {hasGeo && geo.label ? (
-                    <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div>
-                  ) : null}
-                </Panel>
-              ) : null}
-
-              {mobileMode === "wx" ? (
-                <Panel
-                  title="Conditions"
-                  right={
-                    <Segmented
-                      value={tempUnit}
-                      onChange={setTempUnit}
-                      items={[
-                        { value: "f", label: "F" },
-                        { value: "c", label: "C" },
-                      ]}
-                    />
-                  }
-                >
-                  {!hasGeo ? (
-                    <div className="text-sm text-zinc-500">Locate the stop to load conditions.</div>
-                  ) : !wxCurrent ? (
-                    <div className="text-sm text-zinc-500">{wxState.busy ? "Loading" : "No data yet"}</div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-2">
-                      <StatTile
-                        label="Temp"
-                        value={() => {
-                          const c = wxCurrent.temperature_2m
-                          const f = cToF(c)
-                          if (tempUnit === "c") return Number.isFinite(Number(c)) ? `${Math.round(c)}°C` : "?"
-                          return Number.isFinite(Number(f)) ? `${Math.round(f)}°F` : "?"
-                        }}
-                        sub={wxLabel(wxCurrent.weather_code)}
-                      />
-                      <StatTile
-                        label="Wind"
-                        value={Number.isFinite(wxCurrent.wind_speed_10m) ? `${Math.round(wxCurrent.wind_speed_10m)} mph` : "?"}
-                        sub={Number.isFinite(wxCurrent.wind_direction_10m) ? `${Math.round(wxCurrent.wind_direction_10m)}°` : ""}
-                      />
-                      <StatTile label="Precip" value={Number.isFinite(wxCurrent.precipitation) ? `${wxCurrent.precipitation} mm` : "?"} />
-                      <StatTile label="Snow" value={Number.isFinite(wxCurrent.snowfall) ? `${wxCurrent.snowfall} cm` : "?"} />
-                    </div>
-                  )}
-                </Panel>
-              ) : null}
-            </div>
-{/* Adjust 3 */}
-            {/* Sheet always present on tablet, and also present on phone when mode is sheet */}
-            {(mobileMode === "sheet" || !mobileMode) ? (
-              <Panel
-                title="Route sheet"
-                right={
-                  <div className="flex items-center gap-2">
-                    <Button variant="outline" onClick={() => setSheetOpen(true)} disabled={!sheetSrc}>
-                      Expand
-                    </Button>
-                    <Button variant="outline" onClick={geocodeActiveStop}>
-                      Fix geo
-                    </Button>
-                  </div>
-                }
-                className={cx("lg:block", mobileMode !== "sheet" ? "lg:block" : "")}
-              >
-                {sheetSrc ? (
-                  <button
-                    type="button"
-                    onClick={() => setSheetOpen(true)}
-                    className="w-full border border-zinc-200 dark:border-zinc-800"
+                  <Button
+                    variant="outline"
+                    onClick={goNextLocked}
+                    disabled={!completed}
+                    title={completed ? "Next" : "Complete this stop first"}
                   >
-                    <Image
-                      src={sheetSrc}
-                      alt={`${site.slangName || "Stop"} route sheet`}
-                      width={1600}
-                      height={1000}
-                      className="h-auto w-full"
-                      priority
-                    />
-                  </button>
-                ) : (
-                  <div className="border border-dashed border-zinc-300 p-3 text-sm text-zinc-500 dark:border-zinc-700">
-                    No sheet image yet for this stop.
-                  </div>
-                )}
-              </Panel>
+                    {completed && !hasNext ? "Finish" : "Next"}
+                  </Button>
+                </div>
+              </>
             ) : null}
           </div>
         </div>
+
+        {mode === "work" ? (
+          <div className="mt-2">
+            <div className="h-2 w-full border border-zinc-200 dark:border-zinc-800">
+              <div className="h-full bg-zinc-900 dark:bg-zinc-100" style={{ width: `${progress}%` }} />
+            </div>
+            <div className="mt-1 text-[11px] text-zinc-500">
+              Route progress {stats.complete} complete , {stats.pending} pending
+            </div>
+          </div>
+        ) : null}
       </div>
 
-      {/* Bottom queue strip */}
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center gap-2 overflow-x-auto">
-          {sortedStops.map((s, idx) => {
-            const st = statusOf(s)
-            const isActive = s.id === activeStopId
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setActiveStopId(s.id)}
-                className={cx(
-                  "shrink-0 border px-2 py-1 text-xs font-semibold",
-                  stopChipClass(st, isActive),
-                  "border-zinc-200 dark:border-zinc-800"
-                )}
-                title={`${idx + 1} , ${s.site?.slangName || s.id}`}
+      <div className="p-2 pb-20">
+        {mode === "inbox" ? (
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-12 lg:col-span-4 grid gap-2">
+              <Panel title="Inbox status" right={<div className="text-[11px] text-zinc-500">{pendingInboxCount} pending</div>}>
+                <div className="text-sm text-zinc-500">
+                  Accept injects a new stop right after your current stop. It does not jump you forward.
+                </div>
+              </Panel>
+            </div>
+
+            <div className="col-span-12 lg:col-span-8 grid gap-2">
+              <Panel title="Items">
+                <div className="grid gap-2">
+                  {inboxItems?.length ? (
+                    inboxItems.map(item => (
+                      <InboxCard
+                        key={item.id}
+                        item={item}
+                        onAccept={() => acceptInboxItemToRoute(item.id)}
+                        onReject={() => rejectInboxItem(item.id)}
+                      />
+                    ))
+                  ) : (
+                    <div className="border border-dashed border-zinc-300 p-3 text-sm text-zinc-500 dark:border-zinc-700">
+                      Inbox is empty.
+                    </div>
+                  )}
+                </div>
+              </Panel>
+            </div>
+          </div>
+        ) : (
+          <>
+            {isDoneBanner ? (
+              <Panel
+                title="Work completed"
+                right={
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={clearRouteDone}>Dismiss</Button>
+                    <Button variant="secondary" onClick={() => setMode("inbox")}>Open inbox</Button>
+                  </div>
+                }
+                className="mb-2"
               >
-                {idx + 1}
-              </button>
-            )
-          })}
-        </div>
+                <div className="text-sm text-zinc-600 dark:text-zinc-300">
+                  No more stops in the queue.
+                </div>
+              </Panel>
+            ) : null}
+
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-12 lg:col-span-4 grid gap-2">
+                <Panel
+                  title="Actions"
+                  right={
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" onClick={locateStop} disabled={!addrLine || geoState.busy}>
+                        {geoState.busy ? "Locating" : "Locate"}
+                      </Button>
+                      <Button variant="outline" onClick={() => hasGeo && loadWeather(lat, lon)} disabled={!hasGeo || wxState.busy}>
+                        {wxState.busy ? "Wx" : "Refresh wx"}
+                      </Button>
+                    </div>
+                  }
+                >
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button variant="outline" onClick={copyAddress} disabled={!addrLine}>
+                      Copy address
+                    </Button>
+                    <Button variant="secondary" asChild disabled={!mapsHref}>
+                      <a href={mapsHref} target="_blank" rel="noreferrer">Open maps</a>
+                    </Button>
+                  </div>
+
+                  {geoState.error || wxState.error ? (
+                    <div className="mt-2 border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                      {geoState.error || wxState.error}
+                    </div>
+                  ) : null}
+
+                  <Separator className="my-2" />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <StatTile label="Open" value={schedule.timeOpen || "?"} />
+                    <StatTile label="Close" value={schedule.timeClosed || "?"} />
+                    <StatTile label="Days" value={schedule.serviceDays || "?"} />
+                    <StatTile label="First" value={schedule.firstCompletionTime || "?"} />
+                  </div>
+
+                  {active.specialNotes ? (
+                    <>
+                      <Separator className="my-2" />
+                      <div className="text-xs text-zinc-500">Special</div>
+                      <div className="mt-0.5 text-sm">{active.specialNotes}</div>
+                    </>
+                  ) : null}
+                </Panel>
+
+                <Panel title="Work list">
+                  <div className="grid gap-2">
+                    <TaskRow
+                      title="Plow"
+                      detail={work?.plow?.targetInches ? `${work.plow.targetInches} inch target` : "Use the sheet and site feel"}
+                      done={Boolean(checks.plowDone)}
+                      disabled={lockWork}
+                      onToggle={() => patch({ checks: { ...checks, plowDone: !checks.plowDone } })}
+                    />
+
+                    <TaskRow
+                      title="Salt"
+                      detail={saltDetail || "No salt instructions"}
+                      done={Boolean(checks.saltDone)}
+                      disabled={lockWork}
+                      onToggle={() => patch({ checks: { ...checks, saltDone: !checks.saltDone } })}
+                    />
+
+                    <TaskRow
+                      title="Sidewalk"
+                      detail={sidewalkDetail || "No sidewalk instructions"}
+                      done={Boolean(checks.sidewalkDone)}
+                      disabled={lockWork}
+                      onToggle={() => patch({ checks: { ...checks, sidewalkDone: !checks.sidewalkDone } })}
+                    />
+
+                    <TaskRow
+                      title="Satellite check"
+                      detail={satelliteDetail || "None"}
+                      done={Boolean(checks.satelliteChecked)}
+                      disabled={lockWork}
+                      onToggle={() => patch({ checks: { ...checks, satelliteChecked: !checks.satelliteChecked } })}
+                    />
+
+                    <TaskRow
+                      title="Photo"
+                      detail="Proof photo if needed"
+                      done={Boolean(checks.photoCaptured)}
+                      disabled={lockWork}
+                      onToggle={() => patch({ checks: { ...checks, photoCaptured: !checks.photoCaptured } })}
+                    />
+                  </div>
+
+                  <div className="mt-2 text-[11px] text-zinc-500">
+                    Work is locked until Arrived, Complete is locked until required items are done.
+                  </div>
+                </Panel>
+              </div>
+
+              <div className="col-span-12 lg:col-span-8 grid gap-2">
+                <div className="lg:hidden">
+                  <Segmented
+                    value={mobileMode}
+                    onChange={setMobileMode}
+                    items={[
+                      { value: "sheet", label: "Sheet" },
+                      { value: "map", label: "Map" },
+                      { value: "wx", label: "Conditions" },
+                    ]}
+                  />
+                </div>
+
+                <div className="hidden lg:grid grid-cols-2 gap-2">
+                  <Panel
+                    title="Map"
+                    right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}
+                  >
+                    <div className="border border-zinc-200 dark:border-zinc-800">
+                      {hasGeo ? (
+                        <iframe title="map" src={mapUrl} className="h-[32vh] w-full" loading="lazy" />
+                      ) : (
+                        <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
+                      )}
+                    </div>
+                    {hasGeo && geo.label ? <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div> : null}
+                  </Panel>
+
+                  <Panel
+                    title="Conditions"
+                    right={
+                      <div className="flex items-center gap-2">
+                        <Segmented
+                          value={tempUnit}
+                          onChange={setTempUnit}
+                          items={[
+                            { value: "f", label: "F" },
+                            { value: "c", label: "C" },
+                          ]}
+                        />
+                      </div>
+                    }
+                  >
+                    {!hasGeo ? (
+                      <div className="text-sm text-zinc-500">Locate the stop to load conditions.</div>
+                    ) : !wxCurrent ? (
+                      <div className="text-sm text-zinc-500">{wxState.busy ? "Loading" : "No data yet"}</div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <StatTile
+                          label="Temp"
+                          value={() => {
+                            const c = wxCurrent.temperature_2m
+                            const f = cToF(c)
+                            if (tempUnit === "c") return Number.isFinite(Number(c)) ? `${Math.round(c)}°C` : "?"
+                            return Number.isFinite(Number(f)) ? `${Math.round(f)}°F` : "?"
+                          }}
+                          sub={wxLabel(wxCurrent.weather_code)}
+                        />
+                        <StatTile
+                          label="Wind"
+                          value={Number.isFinite(wxCurrent.wind_speed_10m) ? `${Math.round(wxCurrent.wind_speed_10m)} mph` : "?"}
+                          sub={Number.isFinite(wxCurrent.wind_direction_10m) ? `${Math.round(wxCurrent.wind_direction_10m)}°` : ""}
+                        />
+                        <StatTile label="Precip" value={Number.isFinite(wxCurrent.precipitation) ? `${wxCurrent.precipitation} mm` : "?"} />
+                        <StatTile label="Snow" value={Number.isFinite(wxCurrent.snowfall) ? `${wxCurrent.snowfall} cm` : "?"} />
+                      </div>
+                    )}
+                  </Panel>
+                </div>
+
+                <div className="lg:hidden">
+                  {mobileMode === "map" ? (
+                    <Panel title="Map" right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}>
+                      <div className="border border-zinc-200 dark:border-zinc-800">
+                        {hasGeo ? (
+                          <iframe title="map" src={mapUrl} className="h-[38vh] w-full" loading="lazy" />
+                        ) : (
+                          <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
+                        )}
+                      </div>
+                      {hasGeo && geo.label ? <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div> : null}
+                    </Panel>
+                  ) : null}
+
+                  {mobileMode === "wx" ? (
+                    <Panel
+                      title="Conditions"
+                      right={
+                        <Segmented
+                          value={tempUnit}
+                          onChange={setTempUnit}
+                          items={[
+                            { value: "f", label: "F" },
+                            { value: "c", label: "C" },
+                          ]}
+                        />
+                      }
+                    >
+                      {!hasGeo ? (
+                        <div className="text-sm text-zinc-500">Locate the stop to load conditions.</div>
+                      ) : !wxCurrent ? (
+                        <div className="text-sm text-zinc-500">{wxState.busy ? "Loading" : "No data yet"}</div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          <StatTile
+                            label="Temp"
+                            value={() => {
+                              const c = wxCurrent.temperature_2m
+                              const f = cToF(c)
+                              if (tempUnit === "c") return Number.isFinite(Number(c)) ? `${Math.round(c)}°C` : "?"
+                              return Number.isFinite(Number(f)) ? `${Math.round(f)}°F` : "?"
+                            }}
+                            sub={wxLabel(wxCurrent.weather_code)}
+                          />
+                          <StatTile
+                            label="Wind"
+                            value={Number.isFinite(wxCurrent.wind_speed_10m) ? `${Math.round(wxCurrent.wind_speed_10m)} mph` : "?"}
+                            sub={Number.isFinite(wxCurrent.wind_direction_10m) ? `${Math.round(wxCurrent.wind_direction_10m)}°` : ""}
+                          />
+                          <StatTile label="Precip" value={Number.isFinite(wxCurrent.precipitation) ? `${wxCurrent.precipitation} mm` : "?"} />
+                          <StatTile label="Snow" value={Number.isFinite(wxCurrent.snowfall) ? `${wxCurrent.snowfall} cm` : "?"} />
+                        </div>
+                      )}
+                    </Panel>
+                  ) : null}
+                </div>
+
+                {(mobileMode === "sheet" || !mobileMode) ? (
+                  <Panel
+                    title="Route sheet"
+                    right={
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" onClick={() => setSheetOpen(true)} disabled={!sheetSrc}>
+                          Expand
+                        </Button>
+                        <Button variant="outline" onClick={geocodeActiveStop}>
+                          Fix geo
+                        </Button>
+                      </div>
+                    }
+                    className={cx("lg:block", mobileMode !== "sheet" ? "lg:block" : "")}
+                  >
+                    {sheetSrc ? (
+                      <button type="button" onClick={() => setSheetOpen(true)} className="w-full border border-zinc-200 dark:border-zinc-800">
+                        <Image
+                          src={sheetSrc}
+                          alt={`${site.slangName || "Stop"} route sheet`}
+                          width={1600}
+                          height={1000}
+                          className="h-auto w-full"
+                          priority
+                        />
+                      </button>
+                    ) : (
+                      <div className="border border-dashed border-zinc-300 p-3 text-sm text-zinc-500 dark:border-zinc-700">
+                        No sheet image yet for this stop.
+                      </div>
+                    )}
+                  </Panel>
+                ) : null}
+              </div>
+            </div>
+          </>
+        )}
       </div>
+
+      {sortedStops?.length ? (
+        <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-950">
+          <div className="flex items-center gap-2 overflow-x-auto">
+            {sortedStops.map((s, idx) => {
+              const st = statusOf(s)
+              const isActive = s.id === activeStopId
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => {
+                    clearRouteDone()
+                    setMode("work")
+                    setActiveStopId(s.id)
+                  }}
+                  className={cx(
+                    "shrink-0 border px-2 py-1 text-xs font-semibold",
+                    stopChipClass(st, isActive),
+                    "border-zinc-200 dark:border-zinc-800"
+                  )}
+                  title={`${idx + 1} , ${s.site?.slangName || s.id}`}
+                >
+                  {idx + 1}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
 
       <SheetOverlay
         open={sheetOpen}

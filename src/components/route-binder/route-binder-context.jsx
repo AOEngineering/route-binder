@@ -1,8 +1,16 @@
+
 "use client"
-// Test date
+
 import { createContext, useContext, useEffect, useMemo, useState } from "react"
 import { seedStops } from "@/app/model/seedStops"
 import { seedInboxItems } from "@/app/model/seedInbox"
+import { TruckKeyGate } from "@/components/route-binder/truck-key-gate"
+
+const TRUCK_KEY_STORAGE = "routebinder_truck_key_v1"
+
+function stateStorageKey(truckId) {
+  return `routebinder_state_v1_${truckId || "unknown"}`
+}
 
 function nowTime() {
   const d = new Date()
@@ -16,13 +24,13 @@ function safePercent(n) {
   return Math.max(0, Math.min(100, Math.round(n)))
 }
 
-function normalizeStop(stop) {
+function normalizeStop(stop, idx = 0) {
   const s = stop || {}
   const geo = s.site?.geo || {}
 
   return {
-    id: String(s.id || `stop_${Date.now()}`),
-    order: Number.isFinite(s.order) ? s.order : 9999,
+    id: String(s.id || `stop_${idx + 1}`),
+    order: Number.isFinite(s.order) ? s.order : (idx + 1) * 10,
 
     meta: {
       injected: Boolean(s.meta?.injected),
@@ -98,6 +106,30 @@ function normalizeStop(stop) {
   }
 }
 
+function parseWindow(windowStr) {
+  const s = String(windowStr || "")
+  const mOpen = s.match(/Open\s*([0-9]{1,2}:[0-9]{2})/i)
+  const mClose = s.match(/Close\s*([0-9]{1,2}:[0-9]{2})/i)
+  return {
+    timeOpen: mOpen ? mOpen[1] : "",
+    timeClosed: mClose ? mClose[1] : "",
+  }
+}
+
+function normalizeInboxItem(raw, idx = 0) {
+  const r = raw || {}
+  const payload = r.payload || {}
+
+  return {
+    id: String(r.id || `inbox_${idx + 1}`),
+    from: r.from || "",
+    receivedAt: r.receivedAt || "",
+    title: r.title || "Inbox",
+    hint: r.hint || "",
+    payload,
+  }
+}
+
 function requiresSalt(stop) {
   const n = stop?.work?.salt?.amount
   if (!Number.isFinite(n)) return false
@@ -110,27 +142,166 @@ function requiresSidewalk(stop) {
   return n > 0
 }
 
+function renumberOrders(sortedList) {
+  return sortedList.map((s, idx) => ({ ...s, order: (idx + 1) * 10 }))
+}
+
+function loadStoredState(truckId) {
+  try {
+    const raw = localStorage.getItem(stateStorageKey(truckId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function saveStoredState(truckId, next) {
+  try {
+    localStorage.setItem(stateStorageKey(truckId), JSON.stringify(next))
+  } catch {}
+}
+
 const RouteBinderContext = createContext(null)
 
 export function RouteBinderProvider({ children }) {
-  const [truck] = useState("948")
-  const [routeName] = useState("Route 948")
-  const [routeLabel] = useState("West Side Commercial")
+  const [hydrated, setHydrated] = useState(false)
+
+  const [truckKey, setTruckKey] = useState(null)
+  const [truck, setTruck] = useState("")
+  const [routeName, setRouteName] = useState("")
+  const [routeLabel, setRouteLabel] = useState("")
+
+  const [boot, setBoot] = useState({ busy: false, error: "", needsKey: false })
 
   const [mode, setMode] = useState("work")
   const [queueFilter, setQueueFilter] = useState("all")
   const [tick, setTick] = useState(0)
 
-  const [stops, setStops] = useState(() => seedStops.map(normalizeStop))
+  const [stops, setStops] = useState([])
   const [activeStopId, setActiveStopId] = useState(null)
 
-  const [inboxItems, setInboxItems] = useState(() => seedInboxItems)
+  const [inboxItems, setInboxItems] = useState([])
+  const [routeDoneAtTs, setRouteDoneAtTs] = useState(null)
+
+  function applyFallbackSeeds() {
+    setTruck("948")
+    setRouteName("Route 948")
+    setRouteLabel("West Side Commercial")
+
+    setMode("work")
+    setQueueFilter("all")
+
+    setStops(seedStops.map((s, i) => normalizeStop(s, i)))
+    setInboxItems((seedInboxItems || []).map((it, i) => normalizeInboxItem(it, i)))
+
+    setActiveStopId(null)
+    setRouteDoneAtTs(null)
+  }
+
+  async function bootstrapWithKey(k) {
+    setBoot({ busy: true, error: "", needsKey: false })
+    try {
+      const r = await fetch("/api/hub/bootstrap", {
+        headers: { xtruckkey: k },
+        cache: "no-store",
+      })
+
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "")
+        throw new Error(txt || "Key not accepted")
+      }
+
+      const j = await r.json()
+
+      const nextTruckId = String(j?.truck?.id || "")
+      if (!nextTruckId) throw new Error("Missing truck id")
+
+      setTruck(nextTruckId)
+      setRouteName(j?.truck?.routeName || `Route ${nextTruckId}`)
+      setRouteLabel(j?.truck?.routeLabel || "")
+
+      const hubStops = Array.isArray(j?.stops) ? j.stops : []
+      const hubInbox = Array.isArray(j?.inboxItems) ? j.inboxItems : []
+
+      const stored = loadStoredState(nextTruckId)
+
+      if (stored && Array.isArray(stored.stops) && stored.stops.length) {
+        setMode(typeof stored.mode === "string" ? stored.mode : "work")
+        setQueueFilter(typeof stored.queueFilter === "string" ? stored.queueFilter : "all")
+
+        setStops(stored.stops.map((s, i) => normalizeStop(s, i)))
+        setInboxItems((stored.inboxItems || []).map((it, i) => normalizeInboxItem(it, i)))
+
+        setActiveStopId(typeof stored.activeStopId === "string" ? stored.activeStopId : null)
+        setRouteDoneAtTs(Number.isFinite(stored.routeDoneAtTs) ? stored.routeDoneAtTs : null)
+      } else {
+        setMode("work")
+        setQueueFilter("all")
+
+        setStops(hubStops.map((s, i) => normalizeStop(s, i)))
+        setInboxItems(hubInbox.map((it, i) => normalizeInboxItem(it, i)))
+
+        setActiveStopId(null)
+        setRouteDoneAtTs(null)
+      }
+
+      setBoot({ busy: false, error: "", needsKey: false })
+      return true
+    } catch (e) {
+      setBoot({ busy: false, error: String(e?.message || e), needsKey: true })
+      applyFallbackSeeds()
+      return false
+    }
+  }
+
+  async function bindTruckKey(k) {
+    const key = String(k || "").trim()
+    if (!key) return
+    localStorage.setItem(TRUCK_KEY_STORAGE, key)
+    setTruckKey(key)
+    await bootstrapWithKey(key)
+  }
+
+  function resetTruckKey() {
+    try {
+      localStorage.removeItem(TRUCK_KEY_STORAGE)
+    } catch {}
+    setTruckKey(null)
+    setTruck("")
+    setRouteName("")
+    setRouteLabel("")
+    setStops([])
+    setInboxItems([])
+    setActiveStopId(null)
+    setRouteDoneAtTs(null)
+    setBoot({ busy: false, error: "", needsKey: true })
+  }
+
+  useEffect(() => {
+    const k = localStorage.getItem(TRUCK_KEY_STORAGE)
+    if (!k) {
+      setBoot({ busy: false, error: "", needsKey: true })
+      applyFallbackSeeds()
+      setHydrated(true)
+      return
+    }
+
+    setTruckKey(k)
+    bootstrapWithKey(k).finally(() => setHydrated(true))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const sortedStops = useMemo(() => stops.slice().sort((a, b) => a.order - b.order), [stops])
 
   useEffect(() => {
     if (!sortedStops.length) return
-    setActiveStopId(prev => prev ?? sortedStops[0].id)
+    setActiveStopId(prev => {
+      if (prev && sortedStops.some(s => s.id === prev)) return prev
+      return sortedStops[0].id
+    })
   }, [sortedStops])
 
   const activeStop = useMemo(() => {
@@ -163,18 +334,41 @@ export function RouteBinderProvider({ children }) {
     return () => clearInterval(t)
   }, [activeStop?.progress?.arrivedAtTs, activeStop?.progress?.completeAtTs])
 
+  const pendingInboxCount = useMemo(() => inboxItems.length, [inboxItems])
+
+  useEffect(() => {
+    if (!hydrated) return
+    if (!truck) return
+
+    saveStoredState(truck, {
+      version: 1,
+      savedAtTs: Date.now(),
+      mode,
+      queueFilter,
+      activeStopId,
+      routeDoneAtTs,
+      stops,
+      inboxItems,
+    })
+  }, [hydrated, truck, mode, queueFilter, activeStopId, routeDoneAtTs, stops, inboxItems])
+
+  function clearRouteDone() {
+    setRouteDoneAtTs(null)
+  }
+
   function selectStop(id) {
     setActiveStopId(id)
     setMode("work")
+    clearRouteDone()
   }
 
   function updateStop(id, patch) {
     setStops(prev =>
-      prev.map(s => {
+      prev.map((s, idx) => {
         if (s.id !== id) return s
         const merged = { ...s, ...patch }
 
-        const next = normalizeStop(merged)
+        const next = normalizeStop(merged, idx)
 
         next.meta = { ...s.meta, ...(patch.meta || {}) }
         next.sheet = { ...s.sheet, ...(patch.sheet || {}) }
@@ -195,16 +389,12 @@ export function RouteBinderProvider({ children }) {
 
         const geoPatch = patch.site?.geo
         if (geoPatch) {
-          next.site.geo = {
-            ...s.site.geo,
-            ...next.site.geo,
-            ...geoPatch,
-          }
+          next.site.geo = { ...s.site.geo, ...next.site.geo, ...geoPatch }
           next.site.geo.lat = Number.isFinite(next.site.geo.lat) ? next.site.geo.lat : null
           next.site.geo.lon = Number.isFinite(next.site.geo.lon) ? next.site.geo.lon : null
         }
 
-        return normalizeStop(next)
+        return normalizeStop(next, idx)
       })
     )
   }
@@ -214,10 +404,7 @@ export function RouteBinderProvider({ children }) {
       prev.map(s => {
         if (s.id !== id) return s
         if (s.progress.arrivedAtTs) return s
-        return {
-          ...s,
-          progress: { ...s.progress, arrivedAt: nowTime(), arrivedAtTs: Date.now() },
-        }
+        return { ...s, progress: { ...s.progress, arrivedAt: nowTime(), arrivedAtTs: Date.now() } }
       })
     )
   }
@@ -230,7 +417,6 @@ export function RouteBinderProvider({ children }) {
     if (!checks.plowDone) return false
     if (requiresSalt(stop) && !checks.saltDone) return false
     if (requiresSidewalk(stop) && !checks.sidewalkDone) return false
-
     return true
   }
 
@@ -242,10 +428,7 @@ export function RouteBinderProvider({ children }) {
 
         const end = Date.now()
         const dur = Math.floor((end - s.progress.arrivedAtTs) / 1000)
-        return {
-          ...s,
-          progress: { ...s.progress, completeAt: nowTime(), completeAtTs: end, durationSec: dur },
-        }
+        return { ...s, progress: { ...s.progress, completeAt: nowTime(), completeAtTs: end, durationSec: dur } }
       })
     )
   }
@@ -265,12 +448,21 @@ export function RouteBinderProvider({ children }) {
 
   function goNextLocked() {
     if (!activeStop?.progress?.completeAtTs) return
-    if (nextStop) setActiveStopId(nextStop.id)
+
+    if (nextStop) {
+      setActiveStopId(nextStop.id)
+      clearRouteDone()
+      return
+    }
+
+    setRouteDoneAtTs(Date.now())
   }
 
   async function geocodeActiveStop() {
     if (!activeStop) return
-    const addr = [activeStop.site.address, activeStop.site.city, activeStop.site.state, activeStop.site.zip].filter(Boolean).join(", ")
+    const addr = [activeStop.site.address, activeStop.site.city, activeStop.site.state, activeStop.site.zip]
+      .filter(Boolean)
+      .join(", ")
     if (!addr) return
 
     const r = await fetch(`/api/geocode?q=${encodeURIComponent(addr)}`)
@@ -278,14 +470,7 @@ export function RouteBinderProvider({ children }) {
     if (!j?.ok) return
 
     updateStop(activeStop.id, {
-      site: {
-        geo: {
-          lat: Number(j.lat),
-          lon: Number(j.lon),
-          label: j.label || addr,
-          source: "nominatim",
-        },
-      },
+      site: { geo: { lat: Number(j.lat), lon: Number(j.lon), label: j.label || addr, source: "nominatim" } },
     })
   }
 
@@ -295,10 +480,65 @@ export function RouteBinderProvider({ children }) {
     return sortedStops
   }, [sortedStops, queueFilter])
 
+  function rejectInboxItem(inboxId) {
+    setInboxItems(prev => prev.filter(it => it.id !== inboxId))
+  }
+
+  function acceptInboxItemToRoute(inboxId) {
+    const item = inboxItems.find(i => i.id === inboxId)
+    if (!item) return
+
+    const p = item.payload || {}
+    const w = parseWindow(p.window || "")
+    const newStopId = `stop_injected_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+
+    const newStop = normalizeStop(
+      {
+        id: newStopId,
+        order: 9999,
+        meta: { injected: true, assist: Boolean(p.assist) },
+        site: {
+          routeNumber: "",
+          slangName: p.name || item.title || "Injected stop",
+          address: p.address || "",
+          city: p.city || "",
+          state: p.state || "OH",
+          zip: p.zip || "",
+          geo: { lat: null, lon: null, label: "", source: "" },
+        },
+        schedule: { serviceDays: "", firstCompletionTime: "", timeOpen: w.timeOpen, timeClosed: w.timeClosed },
+        work: {
+          plow: { targetInches: null, notes: "" },
+          salt: { product: p.saltSpec || "", amount: null, unit: "scoops", performedBy: "you" },
+          sidewalk: { product: p.shovelSpec || "", amount: null, unit: "bags", performedBy: "you" },
+          satellite: { salt: "" },
+        },
+        specialNotes: "",
+        sheet: { imageSrc: "" },
+      },
+      999
+    )
+
+    setStops(prev => {
+      const list = prev.slice().sort((a, b) => a.order - b.order)
+      const idx = list.findIndex(s => s.id === activeStopId)
+      const insertAt = idx >= 0 ? idx + 1 : list.length
+      list.splice(insertAt, 0, newStop)
+      return renumberOrders(list)
+    })
+
+    setInboxItems(prev => prev.filter(it => it.id !== inboxId))
+    clearRouteDone()
+  }
+
   const value = {
     truck,
     routeName,
     routeLabel,
+    truckKey,
+
+    bindTruckKey,
+    resetTruckKey,
 
     mode,
     setMode,
@@ -311,6 +551,7 @@ export function RouteBinderProvider({ children }) {
 
     inboxItems,
     setInboxItems,
+    pendingInboxCount,
 
     sortedStops,
     queueStops,
@@ -338,6 +579,16 @@ export function RouteBinderProvider({ children }) {
     goNextLocked,
 
     geocodeActiveStop,
+
+    acceptInboxItemToRoute,
+    rejectInboxItem,
+
+    routeDoneAtTs,
+    clearRouteDone,
+  }
+
+  if (boot.needsKey) {
+    return <TruckKeyGate busy={boot.busy} error={boot.error} onSubmit={bindTruckKey} />
   }
 
   return <RouteBinderContext.Provider value={value}>{children}</RouteBinderContext.Provider>
