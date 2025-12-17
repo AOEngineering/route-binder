@@ -1,4 +1,4 @@
-
+// src/components/route-binder/route-binder-context.jsx
 "use client"
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react"
@@ -213,7 +213,9 @@ export function RouteBinderProvider({ children }) {
     setRouteDoneAtTs(null)
   }
 
-  async function bootstrapWithKey(k) {
+  async function bootstrapWithKey(k, opts = {}) {
+    const silent = Boolean(opts.silent)
+
     setBoot({ busy: true, error: "", needsKey: false })
     try {
       const r = await fetch("/api/hub/bootstrap", {
@@ -263,8 +265,19 @@ export function RouteBinderProvider({ children }) {
       setBoot({ busy: false, error: "", needsKey: false })
       return true
     } catch (e) {
+      try {
+        localStorage.removeItem(TRUCK_KEY_STORAGE)
+      } catch {}
+
+      setTruckKey(null)
       purgeAllState()
-      setBoot({ busy: false, error: "Invalid truck key", needsKey: true })
+
+      setBoot({
+        busy: false,
+        error: silent ? "" : "Invalid truck key",
+        needsKey: true,
+      })
+
       return false
     }
   }
@@ -272,11 +285,13 @@ export function RouteBinderProvider({ children }) {
   async function bindTruckKey(k) {
     const key = String(k || "").trim()
     if (!key) return
+
     try {
       localStorage.setItem(TRUCK_KEY_STORAGE, key)
     } catch {}
+
     setTruckKey(key)
-    await bootstrapWithKey(key)
+    await bootstrapWithKey(key, { silent: false })
   }
 
   function resetTruckKey() {
@@ -289,7 +304,12 @@ export function RouteBinderProvider({ children }) {
   }
 
   useEffect(() => {
-    const k = localStorage.getItem(TRUCK_KEY_STORAGE)
+    let k = null
+    try {
+      k = localStorage.getItem(TRUCK_KEY_STORAGE)
+    } catch {
+      k = null
+    }
 
     if (!k) {
       purgeAllState()
@@ -299,7 +319,7 @@ export function RouteBinderProvider({ children }) {
     }
 
     setTruckKey(k)
-    bootstrapWithKey(k).finally(() => setHydrated(true))
+    bootstrapWithKey(k, { silent: true }).finally(() => setHydrated(true))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -376,7 +396,6 @@ export function RouteBinderProvider({ children }) {
       prev.map((s, idx) => {
         if (s.id !== id) return s
         const merged = { ...s, ...patch }
-
         const next = normalizeStop(merged, idx)
 
         next.meta = { ...s.meta, ...(patch.meta || {}) }
@@ -597,7 +616,14 @@ export function RouteBinderProvider({ children }) {
   }
 
   if (!hydrated || boot.needsKey || !truck) {
-    return <TruckKeyGate busy={boot.busy} error={boot.error} onSubmit={bindTruckKey} />
+    return (
+      <TruckKeyGate
+        busy={boot.busy}
+        error={boot.error}
+        onSubmit={bindTruckKey}
+        onReset={resetTruckKey}
+      />
+    )
   }
 
   return <RouteBinderContext.Provider value={value}>{children}</RouteBinderContext.Provider>

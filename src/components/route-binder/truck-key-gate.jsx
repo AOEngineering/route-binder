@@ -1,9 +1,10 @@
+// src/components/route-binder/truck-key-gate.jsx
 "use client"
 
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 
-export function TruckKeyGate({ busy, error, onSubmit }) {
+export function TruckKeyGate({ busy, error, onSubmit, onReset }) {
   const [key, setKey] = useState("")
   const inputRef = useRef(null)
 
@@ -12,10 +13,9 @@ export function TruckKeyGate({ busy, error, onSubmit }) {
   }, [])
 
   useEffect(() => {
-    if (error) {
-      setKey("")
-      inputRef.current?.focus?.()
-    }
+    if (!error) return
+    setKey("")
+    inputRef.current?.focus?.()
   }, [error])
 
   function submit() {
@@ -42,7 +42,7 @@ export function TruckKeyGate({ busy, error, onSubmit }) {
             onKeyDown={e => {
               if (e.key === "Enter") submit()
             }}
-            className="mt-1 w-full border border-zinc-200 bg-white px-2 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-950"
+            className="mt-1 w-full border border-zinc-200 bg-white px-2 py-2 text-[16px] dark:border-zinc-800 dark:bg-zinc-950"
             placeholder="Paste key"
             autoCapitalize="none"
             autoCorrect="off"
@@ -57,19 +57,19 @@ export function TruckKeyGate({ busy, error, onSubmit }) {
           </div>
         ) : null}
 
-        <div className="mt-4">
-          <Button
-            onClick={submit}
-            disabled={!key.trim() || busy}
-            className="w-full"
-          >
+        <div className="mt-4 space-y-2">
+          <Button onClick={submit} disabled={!key.trim() || busy} className="w-full">
             {busy ? "Validating" : "Bind truck"}
           </Button>
+
+          {error && onReset ? (
+            <Button onClick={onReset} variant="ghost" className="w-full" disabled={busy}>
+              Clear saved key
+            </Button>
+          ) : null}
         </div>
 
-        <div className="mt-3 text-xs text-zinc-500">
-          This is required once per device.
-        </div>
+        <div className="mt-3 text-xs text-zinc-500">This is required once per device.</div>
       </div>
     </div>
   )
