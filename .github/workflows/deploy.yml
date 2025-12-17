@@ -35,6 +35,12 @@ jobs:
             PORT="3011"
 
             echo ""
+            echo "0) Basic sanity"
+            node -v || true
+            npm -v || true
+            free -h || true
+
+            echo ""
             echo "1) Clone or update repo"
             if [ ! -d "$REPO_DIR/.git" ]; then
               rm -rf "$REPO_DIR"
@@ -47,33 +53,31 @@ jobs:
             git clean -fd
 
             echo ""
-            echo "2) Install, build, prune"
+            echo "2) Install and build"
             cd "$APP_DIR"
-            rm -rf node_modules .next
 
-            npm ci
-            npm run build
-            npm prune --omit=dev
+            # do not delete node_modules on every deploy, it causes OOM and slows everything down
+            rm -rf .next
 
-            echo ""
-            echo "3) Free port $PORT if something is squatting"
-            if ss -lntp 2>/dev/null | grep -q ":$PORT" || true; then
-              if ss -lntp 2>/dev/null | grep -q ":$PORT"; then
-                echo "Port $PORT is in use, killing listeners"
-                PIDS="$(ss -lntp | awk -v p=":$PORT" '$0 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)"
-                for pid in $PIDS; do
-                  echo "Killing pid $pid"
-                  kill -9 "$pid" 2>/dev/null || true
-                done
-              else
-                echo "Port $PORT appears free"
-              fi
+            # Cap node memory a bit, helps on small boxes
+            export NODE_OPTIONS="--max-old-space-size=1024"
+
+            if [ -f package-lock.json ]; then
+              echo "Using npm ci"
+              npm ci --no-audit --no-fund
+            else
+              echo "No lockfile, using npm install"
+              npm install --no-audit --no-fund
             fi
 
+            npm run build
+            npm prune --omit=dev || true
+
             echo ""
-            echo "4) Start or reload PM2"
+            echo "3) Start or reload PM2"
             export PORT="$PORT"
             export HOSTNAME="127.0.0.1"
+
             if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
               pm2 reload "$APP_NAME" --update-env
             else
@@ -82,16 +86,7 @@ jobs:
             pm2 save
 
             echo ""
-            echo "5) Reload Caddy (if present)"
-            if [ -f /etc/caddy/Caddyfile ]; then
-              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-              caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-            else
-              echo "Caddyfile not found at /etc/caddy/Caddyfile"
-            fi
-
-            echo ""
-            echo "6) Status checks"
+            echo "4) Health checks"
             echo "PM2:"
             pm2 list || true
 
@@ -101,4 +96,13 @@ jobs:
 
             echo ""
             echo "Local upstream check:"
-            timeout 6 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:$PORT" || echo "App not responding"
+            timeout 10 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:$PORT" || echo "App not responding"
+
+            echo ""
+            echo "5) Reload Caddy (if present)"
+            if [ -f /etc/caddy/Caddyfile ]; then
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+              caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+            else
+              echo "Caddyfile not found at /etc/caddy/Caddyfile"
+            fi
