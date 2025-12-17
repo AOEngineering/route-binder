@@ -1,4 +1,3 @@
-
 name: Deploy RouteBinder to Hetzner
 
 on:
@@ -39,10 +38,56 @@ jobs:
 
             REQUESTED_BRANCH="${GITHUB_REF_NAME:-}"
 
+            need_cmd () { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1"; exit 1; }; }
+            need_cmd git
+            need_cmd npm
+            need_cmd node
+            need_cmd pm2
+            need_cmd ss
+
+            port_pids () {
+              ss -ltnp "( sport = :$PORT )" 2>/dev/null \
+                | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' \
+                | sort -u
+            }
+
+            kill_port_listeners () {
+              local pids
+              pids="$(port_pids || true)"
+              if [ -n "${pids:-}" ]; then
+                echo "Port ${PORT} is in use, killing listeners: ${pids}"
+                for pid in $pids; do
+                  kill -TERM "$pid" 2>/dev/null || true
+                done
+                sleep 1
+                pids="$(port_pids || true)"
+                if [ -n "${pids:-}" ]; then
+                  echo "Still in use, force killing: ${pids}"
+                  for pid in $pids; do
+                    kill -KILL "$pid" 2>/dev/null || true
+                  done
+                fi
+              fi
+            }
+
+            wait_port_free () {
+              for i in $(seq 1 30); do
+                if ! ss -ltn "( sport = :$PORT )" 2>/dev/null | grep -q LISTEN; then
+                  echo "Port ${PORT} is free"
+                  return 0
+                fi
+                echo "Waiting for port ${PORT} to free, attempt ${i}"
+                ss -ltnp "( sport = :$PORT )" 2>/dev/null || true
+                sleep 1
+              done
+              echo "Port ${PORT} is still busy"
+              return 1
+            }
+
             if [ ! -d "$REPO_DIR/.git" ]; then
               echo "Cloning repo into $REPO_DIR"
               rm -rf "$REPO_DIR"
-              git clone git@github.com:AOEngineering/RouteBinder.git "$REPO_DIR"
+              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
             fi
 
             cd "$APP_DIR"
@@ -51,18 +96,16 @@ jobs:
             git fetch --all --prune
 
             BRANCH="$REQUESTED_BRANCH"
-            if [ -z "$BRANCH" ]; then
-              BRANCH="master"
-            fi
+            if [ -z "$BRANCH" ]; then BRANCH="master"; fi
 
             if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-              echo "Requested branch '$BRANCH' not found on origin, falling back"
+              echo "Requested branch '${BRANCH}' not found, falling back"
               if git show-ref --verify --quiet "refs/remotes/origin/master"; then
                 BRANCH="master"
               elif git show-ref --verify --quiet "refs/remotes/origin/main"; then
                 BRANCH="main"
               else
-                echo "No origin/master or origin/main found, cannot deploy"
+                echo "No origin/master or origin/main found"
                 git branch -a
                 exit 1
               fi
@@ -74,67 +117,28 @@ jobs:
             git clean -fd
 
             echo "Install deps"
-            command -v npm >/dev/null 2>&1 || { echo "npm not found"; exit 1; }
             npm ci
 
             echo "Build"
             npm run build
 
-            echo "PM2, stop existing app"
-            pm2 delete "$PM2_NAME" || true
-            pm2 flush "$PM2_NAME" || true
-            pm2 save || true
+            echo "Stop PM2 app if it exists"
+            pm2 stop "$PM2_NAME" >/dev/null 2>&1 || true
+            pm2 delete "$PM2_NAME" >/dev/null 2>&1 || true
 
-            echo "Wait for port ${PORT} to be free"
-            set +e
-
-            in_use=0
-            for i in $(seq 1 25); do
-              fuser -n tcp "$PORT" >/dev/null 2>&1
-              rc=$?
-
-              if [ "$rc" -eq 0 ]; then
-                in_use=1
-                echo "Port still in use, attempt $i"
-                fuser -n tcp "$PORT" -v 2>/dev/null || true
-                sleep 1
-              else
-                in_use=0
-                echo "Port is free"
-                break
-              fi
-            done
-
-            if [ "$in_use" -eq 1 ]; then
-              echo "Port still stuck, attempting kill"
-              fuser -n tcp -k "$PORT" >/dev/null 2>&1 || true
-              sleep 1
-
-              echo "Recheck listener"
-              fuser -n tcp "$PORT" >/dev/null 2>&1
-              rc=$?
-
-              if [ "$rc" -eq 0 ]; then
-                echo "Port is STILL in use after kill, showing details"
-                ss -ltnp 2>/dev/null | grep ":$PORT" || true
-                fuser -n tcp "$PORT" -v 2>/dev/null || true
-                exit 1
-              fi
-            fi
-
-            set -e
+            echo "Kill anything still holding port ${PORT}"
+            kill_port_listeners
+            wait_port_free
 
             echo "Start with PM2 on ${HOST}:${PORT}"
             export PORT="$PORT"
             export HOSTNAME="$HOST"
 
-            pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" -- start -p "$PORT" -H "$HOST"
-            pm2 flush "$PM2_NAME" || true
-            pm2 save || true
+            pm2 start "node_modules/next/dist/bin/next" --name "$PM2_NAME" --time -- start -p "$PORT" -H "$HOST"
+            pm2 save >/dev/null 2>&1 || true
 
-            echo "Health check without curl"
+            echo "Health check"
             export HEALTH_URL="http://${HOST}:${PORT}"
-            node -e "const http=require('http'); const url=process.env.HEALTH_URL||'http://127.0.0.1:3012'; let attempt=0; const max=15; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200&&code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
+            node -e "const http=require('http'); const url=process.env.HEALTH_URL; let attempt=0; const max=20; function ping(){ attempt++; const req=http.get(url,res=>{ const code=res.statusCode||0; res.resume(); if(code>=200 && code<500){ console.log('Health OK',code); process.exit(0);} retry();}); req.on('error',retry);} function retry(){ if(attempt>=max){ console.error('App not responding on',url); process.exit(1);} setTimeout(ping,1000);} ping();"
 
             echo "Deploy complete"
-
