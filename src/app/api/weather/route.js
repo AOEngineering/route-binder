@@ -1,39 +1,65 @@
-export const runtime = "nodejs"
+import { NextResponse } from "next/server"
+
+function isValidGeo(lat, lon) {
+  const la = Number(lat)
+  const lo = Number(lon)
+  if (!Number.isFinite(la) || !Number.isFinite(lo)) return false
+  if (Math.abs(la) <= 1 && Math.abs(lo) <= 1) return false
+  return true
+}
+
+async function fetchJson(url, timeoutMs = 9000) {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const r = await fetch(url, { signal: controller.signal, cache: "no-store" })
+    const j = await r.json().catch(() => null)
+    return { ok: r.ok, status: r.status, json: j }
+  } finally {
+    clearTimeout(t)
+  }
+}
 
 export async function GET(req) {
-  const url = new URL(req.url)
-  const lat = Number(url.searchParams.get("lat"))
-  const lon = Number(url.searchParams.get("lon"))
+  const { searchParams } = new URL(req.url)
+  const lat = Number(searchParams.get("lat"))
+  const lon = Number(searchParams.get("lon"))
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    return Response.json({ ok: false, error: "Missing lat or lon" }, { status: 400 })
+  if (!isValidGeo(lat, lon)) {
+    return NextResponse.json({ ok: false, error: "Invalid coordinates" }, { status: 200 })
   }
 
-  const upstream = new URL("https://api.open-meteo.com/v1/forecast")
-  upstream.searchParams.set("latitude", String(lat))
-  upstream.searchParams.set("longitude", String(lon))
-  upstream.searchParams.set(
-    "current",
-    [
-      "temperature_2m",
-      "weather_code",
-      "wind_speed_10m",
-      "wind_direction_10m",
-      "precipitation",
-      "rain",
-      "snowfall",
-    ].join(",")
-  )
-  upstream.searchParams.set("hourly", ["precipitation", "snowfall"].join(","))
-  upstream.searchParams.set("forecast_days", "1")
-  upstream.searchParams.set("timezone", "auto")
+  const url =
+    `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}` +
+    `&current=temperature_2m,weather_code,wind_speed_10m,wind_direction_10m,precipitation,snowfall&timezone=auto`
 
-  const r = await fetch(upstream.toString(), { headers: { Accept: "application/json" } })
+  try {
+    const out = await fetchJson(url, 10000)
+    if (!out.ok || !out.json) {
+      return NextResponse.json({ ok: false, error: "Weather unavailable" }, { status: 200 })
+    }
 
-  if (!r.ok) {
-    return Response.json({ ok: false, error: "Weather upstream failed" }, { status: 502 })
+    const c = out.json?.current || null
+    return NextResponse.json(
+      {
+        ok: true,
+        data: {
+          current: c
+            ? {
+                temperature_2m: c.temperature_2m,
+                weather_code: c.weather_code,
+                wind_speed_10m: c.wind_speed_10m,
+                wind_direction_10m: c.wind_direction_10m,
+                precipitation: c.precipitation,
+                snowfall: c.snowfall,
+              }
+            : null,
+        },
+      },
+      { status: 200 }
+    )
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: "Weather timeout" }, { status: 200 })
   }
-
-  const data = await r.json()
-  return Response.json({ ok: true, data })
 }

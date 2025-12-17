@@ -1,48 +1,103 @@
-export const runtime = "nodejs"
+import { NextResponse } from "next/server"
 
-const cache = new Map()
+function buildCandidates(raw) {
+  const q = String(raw || "").trim()
+  if (!q) return []
+
+  const candidates = [q]
+
+  const cleaned = q.replace(/\s+/g, " ").trim()
+  if (cleaned && cleaned !== q) candidates.push(cleaned)
+
+  // If the address starts with "27211, 27323 Wolf Rd ..."
+  const m = cleaned.match(/^(\d+)\s*,\s*(\d+)\s+(.+)$/)
+  if (m) {
+    const a = m[1]
+    const b = m[2]
+    const rest = m[3]
+    candidates.push(`${a} ${rest}`)
+    candidates.push(`${b} ${rest}`)
+  }
+
+  // Remove a stray comma between numbers
+  const noNumberComma = cleaned.replace(/(\d)\s*,\s*(\d)/g, "$1 $2")
+  if (noNumberComma && noNumberComma !== cleaned) candidates.push(noNumberComma)
+
+  // De comma the whole thing as a fallback
+  const noCommas = cleaned.replace(/,\s*/g, " ")
+  if (noCommas && noCommas !== cleaned) candidates.push(noCommas)
+
+  // Dedup, keep order
+  const seen = new Set()
+  return candidates.filter(s => {
+    if (!s) return false
+    const k = s.toLowerCase()
+    if (seen.has(k)) return false
+    seen.add(k)
+    return true
+  })
+}
+
+async function fetchJson(url, timeoutMs = 9000) {
+  const controller = new AbortController()
+  const t = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const r = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "route-binder/1.0 (hello@aoengineering.io)",
+        "Accept": "application/json",
+      },
+      cache: "no-store",
+    })
+    const j = await r.json().catch(() => null)
+    return { ok: r.ok, status: r.status, json: j }
+  } finally {
+    clearTimeout(t)
+  }
+}
 
 export async function GET(req) {
-  const url = new URL(req.url)
-  const q = (url.searchParams.get("q") || "").trim()
+  const { searchParams } = new URL(req.url)
+  const qRaw = searchParams.get("q") || ""
+  const candidates = buildCandidates(qRaw)
 
-  if (!q) {
-    return Response.json({ ok: false, error: "Missing q" }, { status: 400 })
+  if (!candidates.length) {
+    return NextResponse.json({ ok: false, error: "Missing query" }, { status: 200 })
   }
 
-  if (cache.has(q)) {
-    return Response.json({ ok: true, ...cache.get(q) })
+  for (const q of candidates) {
+    const url =
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&addressdetails=1&q=` +
+      encodeURIComponent(q)
+
+    try {
+      const out = await fetchJson(url, 9000)
+      const arr = Array.isArray(out.json) ? out.json : []
+      const hit = arr[0]
+      const lat = Number(hit?.lat)
+      const lon = Number(hit?.lon)
+
+      if (Number.isFinite(lat) && Number.isFinite(lon) && !(Math.abs(lat) <= 1 && Math.abs(lon) <= 1)) {
+        return NextResponse.json(
+          {
+            ok: true,
+            lat,
+            lon,
+            label: hit?.display_name || q,
+            queryUsed: q,
+          },
+          { status: 200 }
+        )
+      }
+    } catch (e) {
+      // keep trying candidates
+    }
   }
 
-  const upstream = new URL("https://nominatim.openstreetmap.org/search")
-  upstream.searchParams.set("format", "json")
-  upstream.searchParams.set("limit", "1")
-  upstream.searchParams.set("q", q)
-
-  const r = await fetch(upstream.toString(), {
-    headers: {
-      "User-Agent": "route-binder, local app",
-      "Accept": "application/json",
-    },
-  })
-
-  if (!r.ok) {
-    return Response.json({ ok: false, error: "Geocode upstream failed" }, { status: 502 })
-  }
-
-  const data = await r.json()
-  const hit = Array.isArray(data) && data[0] ? data[0] : null
-
-  if (!hit) {
-    return Response.json({ ok: false, error: "No results" }, { status: 404 })
-  }
-
-  const payload = {
-    lat: Number(hit.lat),
-    lon: Number(hit.lon),
-    label: hit.display_name || q,
-  }
-
-  cache.set(q, payload)
-  return Response.json({ ok: true, ...payload })
+  return NextResponse.json(
+    { ok: false, error: "No results", queryTried: candidates[0] || "" },
+    { status: 200 }
+  )
 }

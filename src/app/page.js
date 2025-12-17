@@ -1,16 +1,33 @@
-//src/app/route-binder/page.jsx
-
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import dynamic from "next/dynamic"
 import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import { useRouteBinder } from "@/components/route-binder/route-binder-context"
 
+const StopMap = dynamic(() => import("@/components/stop-map"), {
+  ssr: false,
+  loading: () => (
+    <div className="h-[240px] w-full overflow-hidden border border-zinc-200 bg-white p-2 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950">
+      Loading map
+    </div>
+  ),
+})
+
+
 function cx(...parts) {
   return parts.filter(Boolean).join(" ")
+}
+
+function isValidGeo(lat, lon) {
+  const la = Number(lat)
+  const lo = Number(lon)
+  if (!Number.isFinite(la) || !Number.isFinite(lo)) return false
+  if (Math.abs(la) <= 1 && Math.abs(lo) <= 1) return false
+  return true
 }
 
 function formatQty(n) {
@@ -174,13 +191,19 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
   const scale = Number.isFinite(state?.scale) ? state.scale : 1
   const x = Number.isFinite(state?.x) ? state.x : 0
   const y = Number.isFinite(state?.y) ? state.y : 0
+  const rot = Number.isFinite(state?.rot) ? state.rot : 0
 
   function clampScale(s) {
     return Math.max(0.75, Math.min(6, s))
   }
 
+  function normalizeRot(v) {
+    const n = Number(v) || 0
+    return ((n % 360) + 360) % 360
+  }
+
   function reset() {
-    setState({ scale: 1, x: 0, y: 0 })
+    setState({ scale: 1, x: 0, y: 0, rot: 0 })
   }
 
   function onDoubleTapMaybe() {
@@ -195,7 +218,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
     const delta = -e.deltaY
     const factor = delta > 0 ? 1.08 : 0.92
     const nextScale = clampScale(scale * factor)
-    setState({ scale: nextScale, x, y })
+    setState({ scale: nextScale, x, y, rot })
   }
 
   function onPointerDown(e) {
@@ -219,7 +242,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
     if (pointers.current.size === 1 && !pinchRef.current.active) {
       const dx = e.clientX - prev.x
       const dy = e.clientY - prev.y
-      setState({ scale, x: x + dx, y: y + dy })
+      setState({ scale, x: x + dx, y: y + dy, rot })
       return
     }
 
@@ -234,7 +257,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
 
       const ratio = dist / pinch.startDist
       const nextScale = clampScale(pinch.startScale * ratio)
-      setState({ scale: nextScale, x, y })
+      setState({ scale: nextScale, x, y, rot })
     }
   }
 
@@ -253,11 +276,17 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
           </div>
 
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 1.15), x, y })}>
+            <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 1.15), x, y, rot })}>
               Zoom in
             </Button>
-            <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 0.87), x, y })}>
+            <Button variant="secondary" onClick={() => setState({ scale: clampScale(scale * 0.87), x, y, rot })}>
               Zoom out
+            </Button>
+            <Button variant="secondary" onClick={() => setState({ scale, x, y, rot: normalizeRot(rot - 90) })}>
+              Rotate left
+            </Button>
+            <Button variant="secondary" onClick={() => setState({ scale, x, y, rot: normalizeRot(rot + 90) })}>
+              Rotate right
             </Button>
             <Button variant="secondary" onClick={reset}>
               Reset
@@ -278,7 +307,7 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
           <div
             className="absolute left-1/2 top-1/2"
             style={{
-              transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`,
+              transform: `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${rot}deg) scale(${scale})`,
               transformOrigin: "center center",
               touchAction: "none",
             }}
@@ -295,42 +324,6 @@ function SheetOverlay({ open, onClose, src, title, state, setState }) {
   )
 }
 
-function InboxCard({ item, onAccept, onReject }) {
-  const p = item.payload || {}
-  const addrLine = [p.address, p.city, p.state, p.zip].filter(Boolean).join(", ")
-
-  return (
-    <div className="border p-2 border-zinc-200 dark:border-zinc-800">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">{item.title || "Inbox"}</div>
-            <Badge className="bg-zinc-800 text-white">New</Badge>
-          </div>
-
-          <div className="mt-0.5 text-xs text-zinc-500 truncate">
-            {item.from ? `From ${item.from}` : ""}{item.receivedAt ? ` , ${item.receivedAt}` : ""}
-          </div>
-
-          {item.hint ? <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">{item.hint}</div> : null}
-
-          {p.name ? <div className="mt-1 text-xs text-zinc-500">Stop {p.name}</div> : null}
-          {addrLine ? <div className="mt-0.5 text-xs text-zinc-500 truncate">{addrLine}</div> : null}
-          {p.window ? <div className="mt-0.5 text-xs text-zinc-500 truncate">{p.window}</div> : null}
-        </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-2">
-        <Button variant="secondary" onClick={onAccept}>
-          Accept, add to route
-        </Button>
-        <Button variant="outline" onClick={onReject}>
-          Reject
-        </Button>
-      </div>
-    </div>
-  )
-}
 
 export default function RouteBinderPage() {
   const {
@@ -340,7 +333,7 @@ export default function RouteBinderPage() {
 
     sortedStops,
     activeStopId,
-    setActiveStopId,
+    selectStop,
     updateStop,
 
     activeElapsed,
@@ -364,12 +357,12 @@ export default function RouteBinderPage() {
     routeDoneAtTs,
     clearRouteDone,
 
-    routeSummary,
     exportRouteJson,
     exportRouteCsv,
     startFreshRun,
 
     nextStop,
+    operableStopId,
   } = useRouteBinder()
 
   const active = useMemo(() => {
@@ -399,7 +392,7 @@ export default function RouteBinderPage() {
   const geo = site?.geo || {}
   const lat = Number(geo.lat)
   const lon = Number(geo.lon)
-  const hasGeo = Number.isFinite(lat) && Number.isFinite(lon)
+  const hasGeo = isValidGeo(lat, lon)
 
   const [geoState, setGeoState] = useState({ busy: false, error: "" })
   const [wxState, setWxState] = useState({ busy: false, error: "" })
@@ -409,6 +402,16 @@ export default function RouteBinderPage() {
   const [mobileMode, setMobileMode] = useState("sheet")
   const [sheetOpen, setSheetOpen] = useState(false)
   const [sheetTransforms, setSheetTransforms] = useState({})
+  const [sheetDims, setSheetDims] = useState({})
+
+  const [switchState, setSwitchState] = useState({ busy: false, targetId: null, startTs: 0 })
+  const [sheetLoading, setSheetLoading] = useState(false)
+
+  const completed = Boolean(active?.progress?.completeAtTs)
+  const arrived = Boolean(active?.progress?.arrivedAtTs)
+
+  // Only "view only" for future stops, not for completed history
+  const viewOnly = Boolean(active?.id && operableStopId && active.id !== operableStopId && !completed)
 
   function patch(p) {
     if (!active?.id) return
@@ -420,19 +423,18 @@ export default function RouteBinderPage() {
     if (!q) return
     setGeoState({ busy: true, error: "" })
     try {
-      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`)
-      const j = await r.json()
+      const r = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`, { cache: "no-store" })
+      const j = await r.json().catch(() => null)
       if (!j?.ok) throw new Error(j?.error || "Geocode failed")
+
+      const nextLat = Number(j.lat)
+      const nextLon = Number(j.lon)
+      if (!isValidGeo(nextLat, nextLon)) throw new Error("Bad coordinates")
 
       patch({
         site: {
           ...site,
-          geo: {
-            lat: Number(j.lat),
-            lon: Number(j.lon),
-            label: j.label || q,
-            source: "nominatim",
-          },
+          geo: { lat: nextLat, lon: nextLon, label: j.label || q, source: "nominatim" },
         },
       })
     } catch (e) {
@@ -442,12 +444,18 @@ export default function RouteBinderPage() {
     setGeoState({ busy: false, error: "" })
   }
 
+  const lastWxKeyRef = useRef("")
   async function loadWeather(forLat, forLon) {
-    if (!Number.isFinite(forLat) || !Number.isFinite(forLon)) return
+    if (!isValidGeo(forLat, forLon)) return
+
+    const key = `${Number(forLat).toFixed(5)},${Number(forLon).toFixed(5)}`
+    if (lastWxKeyRef.current === key) return
+    lastWxKeyRef.current = key
+
     setWxState({ busy: true, error: "" })
     try {
-      const r = await fetch(`/api/weather?lat=${encodeURIComponent(forLat)}&lon=${encodeURIComponent(forLon)}`)
-      const j = await r.json()
+      const r = await fetch(`/api/weather?lat=${encodeURIComponent(forLat)}&lon=${encodeURIComponent(forLon)}`, { cache: "no-store" })
+      const j = await r.json().catch(() => null)
       if (!j?.ok) throw new Error(j?.error || "Weather failed")
       setWx(j.data || null)
     } catch (e) {
@@ -459,11 +467,14 @@ export default function RouteBinderPage() {
 
   useEffect(() => {
     if (!active?.id) return
+
     setWx(null)
     setWxState({ busy: false, error: "" })
     setGeoState({ busy: false, error: "" })
 
-    const already = Number.isFinite(Number(site?.geo?.lat)) && Number.isFinite(Number(site?.geo?.lon))
+    setSheetLoading(Boolean(active?.sheet?.imageSrc))
+
+    const already = isValidGeo(site?.geo?.lat, site?.geo?.lon)
     if (!already && addrLine) {
       locateStop()
       return
@@ -478,7 +489,19 @@ export default function RouteBinderPage() {
     if (!hasGeo) return
     loadWeather(lat, lon)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lat, lon])
+  }, [hasGeo, lat, lon])
+
+  useEffect(() => {
+    if (!switchState.busy) return
+    if (!switchState.targetId) return
+    if (activeStopId !== switchState.targetId) return
+    if (sheetLoading) return
+
+    const elapsed = Date.now() - (switchState.startTs || Date.now())
+    const wait = Math.max(0, 250 - elapsed)
+    const t = setTimeout(() => setSwitchState({ busy: false, targetId: null, startTs: 0 }), wait)
+    return () => clearTimeout(t)
+  }, [switchState, activeStopId, sheetLoading])
 
   async function copyAddress() {
     if (!addrLine) return
@@ -505,24 +528,10 @@ export default function RouteBinderPage() {
 
   const satelliteDetail = work?.satellite?.salt ? `Salt: ${work.satellite.salt}` : ""
 
-  const mapUrl = useMemo(() => {
-    if (!hasGeo) return ""
-    const d = 0.012
-    const left = lon - d
-    const right = lon + d
-    const top = lat + d
-    const bottom = lat - d
-    const bbox = [left, bottom, right, top].join(",")
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(bbox)}&layer=mapnik&marker=${encodeURIComponent(
-      `${lat},${lon}`
-    )}`
-  }, [hasGeo, lat, lon])
-
-  const completed = Boolean(active?.progress?.completeAtTs)
-  const arrived = Boolean(active?.progress?.arrivedAtTs)
-
   const canFinish = Boolean(active && canComplete(active))
-  const lockWork = !arrived || completed
+
+  // Work edits are still locked until arrived, and after completion
+  const lockWork = viewOnly || !arrived || completed
 
   const wxCurrent = wx?.current || null
 
@@ -536,11 +545,34 @@ export default function RouteBinderPage() {
   }, [schedule.serviceDays, schedule.firstCompletionTime, schedule.timeOpen, schedule.timeClosed])
 
   const sheetSrc = active?.sheet?.imageSrc || ""
-  const sheetTransform = sheetTransforms[active?.id] || { scale: 1, x: 0, y: 0 }
+  const sheetTransform = sheetTransforms[active?.id] || { scale: 1, x: 0, y: 0, rot: 0 }
 
   function setSheetTransform(next) {
+    if (!active?.id) return
     setSheetTransforms(prev => ({ ...prev, [active.id]: next }))
   }
+
+  function normalizeRot(v) {
+    const n = Number(v) || 0
+    return ((n % 360) + 360) % 360
+  }
+
+  function rotateSheet(deltaDeg) {
+    setSheetTransform({ ...sheetTransform, rot: normalizeRot((sheetTransform.rot || 0) + deltaDeg) })
+  }
+
+  function resetSheet() {
+    setSheetTransform({ scale: 1, x: 0, y: 0, rot: 0 })
+  }
+
+  // rotation and perfect fit preview logic
+  const sheetRot = Number.isFinite(sheetTransform?.rot) ? sheetTransform.rot : 0
+  const quarterTurn = Math.abs(Math.round(sheetRot / 90)) % 2 === 1
+
+  const dims = sheetDims[active?.id] || { w: 1600, h: 1000 }
+  const baseW = Number(dims.w) > 0 ? Number(dims.w) : 1600
+  const baseH = Number(dims.h) > 0 ? Number(dims.h) : 1000
+  const viewportAspect = quarterTurn ? `${baseH} / ${baseW}` : `${baseW} / ${baseH}`
 
   const isDoneBanner = Boolean(routeDoneAtTs)
   const hasNext = Boolean(nextStop)
@@ -566,6 +598,12 @@ export default function RouteBinderPage() {
               </div>
 
               {mode === "work" ? <Badge className={pill.className}>{pill.label}</Badge> : null}
+
+              {mode === "work" && viewOnly ? (
+                <Badge variant="secondary" className="px-2 py-1">
+                  Viewing only
+                </Badge>
+              ) : null}
 
               {mode === "work" && active?.meta?.injected ? <Badge variant="secondary" className="px-2 py-1">Injected</Badge> : null}
               {mode === "work" && active?.meta?.assist ? <Badge variant="secondary" className="px-2 py-1">Assist</Badge> : null}
@@ -601,18 +639,10 @@ export default function RouteBinderPage() {
 
           <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="flex items-center border border-zinc-200 dark:border-zinc-800">
-              <Button
-                variant={mode === "work" ? "secondary" : "outline"}
-                onClick={() => setMode("work")}
-                className="rounded-none border-0"
-              >
+              <Button variant={mode === "work" ? "secondary" : "outline"} onClick={() => setMode("work")} className="rounded-none border-0">
                 Work
               </Button>
-              <Button
-                variant={mode === "inbox" ? "secondary" : "outline"}
-                onClick={() => setMode("inbox")}
-                className="rounded-none border-0"
-              >
+              <Button variant={mode === "inbox" ? "secondary" : "outline"} onClick={() => setMode("inbox")} className="rounded-none border-0">
                 Inbox
               </Button>
             </div>
@@ -621,17 +651,18 @@ export default function RouteBinderPage() {
               <>
                 <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button onClick={() => markArrived(active.id)} disabled={arrived || completed}>
+                  <Button onClick={() => markArrived(active.id)} disabled={viewOnly || arrived || completed}>
                     Arrived
                   </Button>
-                  <Button variant="secondary" onClick={() => markComplete(active.id)} disabled={!canFinish}>
+                  <Button variant="secondary" onClick={() => markComplete(active.id)} disabled={viewOnly || !canFinish}>
                     Complete
                   </Button>
+
                   <Button
                     variant="outline"
                     onClick={goNextLocked}
                     disabled={!completed}
-                    title={completed ? "Next" : "Complete this stop first"}
+                    title={!completed ? "Complete this stop first" : "Next"}
                   >
                     {completed && !hasNext ? "Finish" : "Next"}
                   </Button>
@@ -653,14 +684,23 @@ export default function RouteBinderPage() {
         ) : null}
       </div>
 
+      {switchState.busy ? (
+        <div className="fixed inset-0 z-[55] bg-black/30">
+          <div className="absolute left-1/2 top-24 -translate-x-1/2 rounded-lg border border-zinc-200 bg-white px-4 py-3 shadow dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="flex items-center gap-3">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100" />
+              <div className="text-sm font-semibold">Loading stop</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="p-2 pb-20">
         {mode === "inbox" ? (
           <div className="grid grid-cols-12 gap-2">
             <div className="col-span-12 xl:col-span-4 grid gap-2">
               <Panel title="Inbox status" right={<div className="text-[11px] text-zinc-500">{pendingInboxCount} pending</div>}>
-                <div className="text-sm text-zinc-500">
-                  Accept injects a new stop right after your current stop. It does not jump you forward.
-                </div>
+                <div className="text-sm text-zinc-500">Accept injects a new stop right after your current stop. It does not jump you forward.</div>
               </Panel>
             </div>
 
@@ -669,12 +709,31 @@ export default function RouteBinderPage() {
                 <div className="grid gap-2">
                   {inboxItems?.length ? (
                     inboxItems.map(item => (
-                      <InboxCard
-                        key={item.id}
-                        item={item}
-                        onAccept={() => acceptInboxItemToRoute(item.id)}
-                        onReject={() => rejectInboxItem(item.id)}
-                      />
+                      <div key={item.id} className="border p-2 border-zinc-200 dark:border-zinc-800">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate">{item.title || "Inbox"}</div>
+                              <Badge className="bg-zinc-800 text-white">New</Badge>
+                            </div>
+
+                            <div className="mt-0.5 text-xs text-zinc-500 truncate">
+                              {item.from ? `From ${item.from}` : ""}{item.receivedAt ? ` , ${item.receivedAt}` : ""}
+                            </div>
+
+                            {item.hint ? <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">{item.hint}</div> : null}
+                          </div>
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button variant="secondary" onClick={() => acceptInboxItemToRoute(item.id)}>
+                            Accept, add to route
+                          </Button>
+                          <Button variant="outline" onClick={() => rejectInboxItem(item.id)}>
+                            Reject
+                          </Button>
+                        </div>
+                      </div>
                     ))
                   ) : (
                     <div className="border border-dashed border-zinc-300 p-3 text-sm text-zinc-500 dark:border-zinc-700">
@@ -701,64 +760,7 @@ export default function RouteBinderPage() {
                 }
                 className="mb-2"
               >
-                <div className="text-sm text-zinc-600 dark:text-zinc-300">
-                  Route is complete. Export the run, then start fresh when you are ready.
-                </div>
-
-                {routeSummary ? (
-                  <>
-                    <Separator className="my-2" />
-
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                      <StatTile label="Truck" value={truck || "?"} sub={routeName || routeLabel || ""} />
-                      <StatTile
-                        label="Stops"
-                        value={`${routeSummary.completedStops} of ${routeSummary.totalStops}`}
-                        sub={routeSummary.allComplete ? "All complete" : "Some incomplete"}
-                      />
-                      <StatTile
-                        label="Route span"
-                        value={formatDuration(routeSummary.routeSpanSec)}
-                        sub="First arrival to finish"
-                      />
-                      <StatTile
-                        label="On site time"
-                        value={formatDuration(routeSummary.onSiteSec)}
-                        sub="Sum of stop timers"
-                      />
-
-                      <StatTile label="Injected" value={routeSummary.injectedCount} />
-                      <StatTile label="Assist" value={routeSummary.assistCount} />
-                      <StatTile
-                        label="Salt stops"
-                        value={routeSummary.saltStops}
-                        sub={Number.isFinite(routeSummary.saltTotal) && routeSummary.saltTotal > 0 ? `Total ${routeSummary.saltTotal}` : ""}
-                      />
-                      <StatTile
-                        label="Sidewalk stops"
-                        value={routeSummary.sidewalkStops}
-                        sub={Number.isFinite(routeSummary.sidewalkTotal) && routeSummary.sidewalkTotal > 0 ? `Total ${routeSummary.sidewalkTotal}` : ""}
-                      />
-                    </div>
-
-                    {inboxItems?.length ? (
-                      <>
-                        <Separator className="my-2" />
-                        <div className="text-xs text-zinc-500">
-                          Inbox still has {inboxItems.length} item{inboxItems.length === 1 ? "" : "s"}.
-                          If dispatch sent anything late, it is still here.
-                        </div>
-                      </>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <Separator className="my-2" />
-                    <div className="text-xs text-zinc-500">
-                      Summary is not available yet. Finish at least one stop with Arrived and Complete to generate timing.
-                    </div>
-                  </>
-                )}
+                <div className="text-sm text-zinc-600 dark:text-zinc-300">Route is complete. Export the run, then start fresh when you are ready.</div>
               </Panel>
             ) : null}
 
@@ -873,33 +875,21 @@ export default function RouteBinderPage() {
                 </div>
 
                 <div className="hidden xl:grid grid-cols-2 gap-2">
-                  <Panel
-                    title="Map"
-                    right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}
-                  >
-                    <div className="border border-zinc-200 dark:border-zinc-800">
-                      {hasGeo ? (
-                        <iframe title="map" src={mapUrl} className="h-[32vh] w-full" loading="lazy" />
-                      ) : (
-                        <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
-                      )}
-                    </div>
-                    {hasGeo && geo.label ? <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div> : null}
+                  <Panel title="Map" right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}>
+                    <StopMap lat={lat} lon={lon} label={geo.label || addrLine} height={260} />
                   </Panel>
 
                   <Panel
                     title="Conditions"
                     right={
-                      <div className="flex items-center gap-2">
-                        <Segmented
-                          value={tempUnit}
-                          onChange={setTempUnit}
-                          items={[
-                            { value: "f", label: "F" },
-                            { value: "c", label: "C" },
-                          ]}
-                        />
-                      </div>
+                      <Segmented
+                        value={tempUnit}
+                        onChange={setTempUnit}
+                        items={[
+                          { value: "f", label: "F" },
+                          { value: "c", label: "C" },
+                        ]}
+                      />
                     }
                   >
                     {!hasGeo ? (
@@ -933,14 +923,7 @@ export default function RouteBinderPage() {
                 <div className="xl:hidden">
                   {mobileMode === "map" ? (
                     <Panel title="Map" right={<div className="text-[11px] text-zinc-500">{hasGeo ? `${lat.toFixed(5)}, ${lon.toFixed(5)}` : "No coords"}</div>}>
-                      <div className="border border-zinc-200 dark:border-zinc-800">
-                        {hasGeo ? (
-                          <iframe title="map" src={mapUrl} className="h-[38vh] w-full" loading="lazy" />
-                        ) : (
-                          <div className="p-2 text-sm text-zinc-500">No location yet. Press Locate.</div>
-                        )}
-                      </div>
-                      {hasGeo && geo.label ? <div className="mt-1 text-[11px] text-zinc-500 break-words">Label , {geo.label}</div> : null}
+                      <StopMap lat={lat} lon={lon} label={geo.label || addrLine} height={320} />
                     </Panel>
                   ) : null}
 
@@ -992,6 +975,18 @@ export default function RouteBinderPage() {
                     title="Route sheet"
                     right={
                       <div className="flex items-center gap-2">
+                        <Button variant="outline" onClick={() => rotateSheet(-90)} disabled={!sheetSrc}>
+                          Rotate left
+                        </Button>
+                        <Button variant="outline" onClick={() => rotateSheet(90)} disabled={!sheetSrc}>
+                          Rotate right
+                        </Button>
+                        <Button variant="outline" onClick={resetSheet} disabled={!sheetSrc}>
+                          Reset
+                        </Button>
+
+                        <Separator className="mx-1 h-6 w-px bg-zinc-200 dark:bg-zinc-800" />
+
                         <Button variant="outline" onClick={() => setSheetOpen(true)} disabled={!sheetSrc}>
                           Expand
                         </Button>
@@ -1003,15 +998,55 @@ export default function RouteBinderPage() {
                     className="xl:block"
                   >
                     {sheetSrc ? (
-                      <button type="button" onClick={() => setSheetOpen(true)} className="w-full border border-zinc-200 dark:border-zinc-800">
-                        <Image
-                          src={sheetSrc}
-                          alt={`${site.slangName || "Stop"} route sheet`}
-                          width={1600}
-                          height={1000}
-                          className="h-auto w-full"
-                          priority
-                        />
+                      <button
+                        type="button"
+                        onClick={() => setSheetOpen(true)}
+                        className="relative w-full overflow-hidden border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+                      >
+                        {sheetLoading ? (
+                          <div className="absolute inset-0 z-10 grid place-items-center bg-white/70 dark:bg-zinc-950/70">
+                            <div className="flex items-center gap-3">
+                              <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-900 dark:border-zinc-700 dark:border-t-zinc-100" />
+                              <div className="text-sm font-semibold">Loading sheet</div>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div
+                          className="relative w-full overflow-hidden"
+                          style={{
+                            aspectRatio: viewportAspect,
+                            maxHeight: "70vh",
+                          }}
+                        >
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              transform: `rotate(${sheetRot}deg)`,
+                              transformOrigin: "center center",
+                            }}
+                          >
+                            <Image
+                              key={active?.id || "sheet"}
+                              src={sheetSrc}
+                              alt={`${site.slangName || "Stop"} route sheet`}
+                              fill
+                              sizes="100vw"
+                              className="object-contain"
+                              priority
+                              onLoadingComplete={(img) => {
+                                if (active?.id && img?.naturalWidth && img?.naturalHeight) {
+                                  setSheetDims(prev => ({
+                                    ...prev,
+                                    [active.id]: { w: img.naturalWidth, h: img.naturalHeight },
+                                  }))
+                                }
+                                setSheetLoading(false)
+                              }}
+                              onError={() => setSheetLoading(false)}
+                            />
+                          </div>
+                        </div>
                       </button>
                     ) : (
                       <div className="border border-dashed border-zinc-300 p-3 text-sm text-zinc-500 dark:border-zinc-700">
@@ -1039,13 +1074,11 @@ export default function RouteBinderPage() {
                   onClick={() => {
                     clearRouteDone()
                     setMode("work")
-                    setActiveStopId(s.id)
+                    setSheetLoading(true)
+                    setSwitchState({ busy: true, targetId: s.id, startTs: Date.now() })
+                    selectStop(s.id)
                   }}
-                  className={cx(
-                    "shrink-0 border px-2 py-1 text-xs font-semibold",
-                    stopChipClass(st, isActive),
-                    "border-zinc-200 dark:border-zinc-800"
-                  )}
+                  className={cx("shrink-0 border px-2 py-1 text-xs font-semibold", stopChipClass(st, isActive), "border-zinc-200 dark:border-zinc-800")}
                   title={`${idx + 1} , ${s.site?.slangName || s.id}`}
                 >
                   {idx + 1}
@@ -1067,4 +1100,3 @@ export default function RouteBinderPage() {
     </div>
   )
 }
-// #6
