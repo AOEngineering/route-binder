@@ -23,6 +23,7 @@ jobs:
           username: root
           key: ${{ secrets.SSH_KEY }}
           script_stop: true
+          command_timeout: 30m
           script: |
             set -euo pipefail
 
@@ -31,8 +32,8 @@ jobs:
             APP_NAME="route-binder"
             REPO_DIR="/root/route-binder"
             APP_DIR="$REPO_DIR"
-            BRANCH="master"
             PORT="3011"
+            BRANCH="${GITHUB_REF_NAME:-master}"
 
             echo ""
             echo "0) Basic sanity"
@@ -41,10 +42,16 @@ jobs:
             free -h || true
 
             echo ""
+            echo "0.1) Ensure pm2 exists"
+            if ! command -v pm2 >/dev/null 2>&1; then
+              npm install -g pm2
+            fi
+
+            echo ""
             echo "1) Clone or update repo"
             if [ ! -d "$REPO_DIR/.git" ]; then
               rm -rf "$REPO_DIR"
-              git clone git@github.com:AOEngineering/route-binder.git "$REPO_DIR"
+              git clone https://github.com/AOEngineering/route-binder.git "$REPO_DIR"
             fi
 
             cd "$REPO_DIR"
@@ -55,18 +62,12 @@ jobs:
             echo ""
             echo "2) Install and build"
             cd "$APP_DIR"
-
-            # do not delete node_modules on every deploy, it causes OOM and slows everything down
             rm -rf .next
-
-            # Cap node memory a bit, helps on small boxes
             export NODE_OPTIONS="--max-old-space-size=1024"
 
             if [ -f package-lock.json ]; then
-              echo "Using npm ci"
               npm ci --no-audit --no-fund
             else
-              echo "No lockfile, using npm install"
               npm install --no-audit --no-fund
             fi
 
@@ -74,35 +75,24 @@ jobs:
             npm prune --omit=dev || true
 
             echo ""
-            echo "3) Start or reload PM2"
+            echo "3) Restart PM2 cleanly"
             export PORT="$PORT"
             export HOSTNAME="127.0.0.1"
+            export NODE_ENV="production"
 
+            # Restart is more deterministic than reload when you just want latest code every time
             if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-              pm2 reload "$APP_NAME" --update-env
+              pm2 restart "$APP_NAME" --update-env
             else
-              pm2 start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start --time
+              pm2 start npm --name "$APP_NAME" --cwd "$APP_DIR" --time -- start
             fi
-            pm2 save
+
+            pm2 save || true
 
             echo ""
             echo "4) Health checks"
-            echo "PM2:"
-            pm2 list || true
+            pm2 status || true
+            pm2 logs "$APP_NAME" --lines 40 --nostream || true
 
-            echo ""
-            echo "Listening on $PORT:"
             ss -lntp | grep ":$PORT" || echo "Nothing listening on $PORT"
-
-            echo ""
-            echo "Local upstream check:"
             timeout 10 curl -s -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:$PORT" || echo "App not responding"
-
-            echo ""
-            echo "5) Reload Caddy (if present)"
-            if [ -f /etc/caddy/Caddyfile ]; then
-              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-              caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
-            else
-              echo "Caddyfile not found at /etc/caddy/Caddyfile"
-            fi
